@@ -75,6 +75,7 @@ exports.createAppointment = async (req, res) => {
 
 
 // Las otras funciones del controlador no necesitan cambios, pero las dejamos para que el archivo esté completo.
+// Puedes reemplazar la función entera exports.getAppointmentsByTenant con esta versión
 
 exports.getAppointmentsByTenant = async (req, res) => {
     const { tenantId } = req.params;
@@ -85,11 +86,16 @@ exports.getAppointmentsByTenant = async (req, res) => {
     }
 
     try {
+        // --- CONSULTA CORREGIDA ---
         const query = `
-            SELECT a.id, a.start_time, a.end_time, a.status,
-                   s.name as service_name, s.price,
-                   client.first_name as client_first_name, client.last_name as client_last_name,
-                   stylist.first_name as stylist_first_name, stylist.last_name as stylist_last_name
+            SELECT
+                a.id, a.start_time, a.end_time, a.status,
+                a.service_id,
+                a.stylist_id,
+                a.client_id,
+                s.name as service_name, s.price,
+                client.first_name as client_first_name, client.last_name as client_last_name,
+                stylist.first_name as stylist_first_name, stylist.last_name as stylist_last_name
             FROM appointments a
             JOIN services s ON a.service_id = s.id
             JOIN users client ON a.client_id = client.id
@@ -97,6 +103,8 @@ exports.getAppointmentsByTenant = async (req, res) => {
             WHERE a.tenant_id = $1 AND a.start_time >= $2 AND a.start_time <= $3
             ORDER BY a.start_time;
         `;
+        // --- FIN DE LA CORRECCIÓN ---
+
         const result = await db.query(query, [tenantId, startDate, endDate]);
         res.status(200).json(result.rows);
     } catch (error) {
@@ -104,6 +112,7 @@ exports.getAppointmentsByTenant = async (req, res) => {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 };
+
 
 exports.updateAppointmentStatus = async (req, res) => {
     const { id } = req.params;

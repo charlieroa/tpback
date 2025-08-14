@@ -141,3 +141,34 @@ exports.getNextAvailableStylist = async (req, res) => {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 };
+
+exports.getUserByPhone = async (req, res) => {
+    const { phoneNumber } = req.params;
+    // El tenant_id lo podemos obtener del token del usuario que hace la búsqueda (el bot)
+    const { tenant_id } = req.user;
+
+    // Podríamos quitar el prefijo del país si siempre es el mismo,
+    // pero por ahora lo buscamos tal cual.
+    if (!phoneNumber) {
+        return res.status(400).json({ error: "Número de teléfono no proporcionado." });
+    }
+
+    try {
+        const result = await db.query(
+            // Buscamos un usuario que coincida con el teléfono Y que pertenezca al mismo tenant
+            'SELECT id, tenant_id, role_id, first_name, last_name, email FROM users WHERE phone = $1 AND tenant_id = $2',
+            [phoneNumber, tenant_id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Usuario no encontrado con ese número de teléfono.' });
+        }
+
+        // Devolvemos el primer usuario encontrado
+        res.status(200).json(result.rows[0]);
+
+    } catch (error) {
+        console.error('Error al buscar usuario por teléfono:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+};

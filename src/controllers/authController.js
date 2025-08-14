@@ -1,9 +1,11 @@
-// src/controllers/authController.js
+// Contenido COMPLETO y FINAL para: src/controllers/authController.js
+
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const slugify = require('slugify');
 
+// --- Función para Iniciar Sesión ---
 exports.login = async (req, res) => {
     const { email, password } = req.body;
 
@@ -12,22 +14,21 @@ exports.login = async (req, res) => {
     }
 
     try {
-        // 1. Buscar al usuario por su email
         const userResult = await db.query('SELECT * FROM users WHERE email = $1', [email]);
         if (userResult.rows.length === 0) {
-            // Usamos un mensaje genérico para no dar pistas a atacantes
             return res.status(401).json({ error: 'Credenciales inválidas.' });
         }
 
         const user = userResult.rows[0];
 
-        // 2. Comparar la contraseña enviada con el hash guardado en la BD
         const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) {
             return res.status(401).json({ error: 'Credenciales inválidas.' });
         }
 
-        // 3. Si las credenciales son correctas, crear el payload para el token
+        // --- CORRECCIÓN CLAVE ---
+        // El payload DEBE tener una clave 'user' que contenga los datos,
+        // porque así lo espera nuestro authMiddleware.
         const payload = {
             user: {
                 id: user.id,
@@ -35,12 +36,12 @@ exports.login = async (req, res) => {
                 tenant_id: user.tenant_id
             }
         };
+        // --- FIN DE LA CORRECCIÓN ---
 
-        // 4. Firmar el token con el secreto y enviarlo de vuelta
         jwt.sign(
             payload,
             process.env.JWT_SECRET,
-            { expiresIn: '8h' }, // El token expirará en 8 horas
+            { expiresIn: '8h' },
             (err, token) => {
                 if (err) throw err;
                 res.json({ token });
@@ -53,8 +54,8 @@ exports.login = async (req, res) => {
     }
 };
 
-// Pega este bloque completo al final de authController.js
 
+// --- Función para Registrar Dueño y Peluquería ---
 const createSlug = (text) => {
     return slugify(text, { lower: true, strict: true, remove: /[*+~.()'"!:@]/g });
 };
