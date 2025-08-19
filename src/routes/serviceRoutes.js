@@ -1,21 +1,21 @@
-// src/routes/serviceRoutes.js
+// Contenido COMPLETO y FINAL para: src/routes/serviceRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const serviceController = require('../controllers/serviceController');
+const authMiddleware = require('../middleware/authMiddleware'); // <-- 1. IMPORTAMOS EL MIDDLEWARE
 
-// POST /api/services - Crear un nuevo servicio
-router.post('/', serviceController.createService);
+// --- Rutas Generales (Protegidas) ---
+router.post('/', authMiddleware, serviceController.createService);
+router.get('/tenant/:tenantId', authMiddleware, serviceController.getServicesByTenant);
 
-// GET /api/services/tenant/:tenantId - Obtener todos los servicios de una peluquería
-router.get('/tenant/:tenantId', serviceController.getServicesByTenant);
+// --- Nueva Ruta Específica (Debe ir antes de /:id para no generar conflictos) ---
+// GET /api/services/:id/stylists - Obtener estilistas que pueden hacer este servicio
+router.get('/:id/stylists', authMiddleware, serviceController.getStylistsForService); // <-- 2. AÑADIMOS LA NUEVA RUTA
 
-// GET /api/services/:id - Obtener un servicio por ID
-router.get('/:id', serviceController.getServiceById);
-
-// PUT /api/services/:id - Actualizar un servicio por ID
-router.put('/:id', serviceController.updateService);
-
-// DELETE /api/services/:id - Eliminar un servicio por ID
-router.delete('/:id', serviceController.deleteService);
+// --- Rutas que operan sobre un servicio específico (Protegidas) ---
+router.get('/:id', authMiddleware, serviceController.getServiceById);
+router.put('/:id', authMiddleware, serviceController.updateService);
+router.delete('/:id', authMiddleware, serviceController.deleteService);
 
 module.exports = router;
