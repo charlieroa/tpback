@@ -152,61 +152,77 @@ exports.deleteAppointment = async (req, res) => {
 };
 
 // AÑADIR ESTA NUEVA FUNCIÓN AL FINAL DEL ARCHIVO
+// REEMPLAZA la función getAvailability en appointmentController.js
+
+// REEMPLAZA la función getAvailability con esta versión de DEPURACIÓN
+
 exports.getAvailability = async (req, res) => {
-    // Obtenemos los datos desde los query parameters de la URL
     const { tenant_id, stylist_id, date } = req.query;
 
     if (!tenant_id || !stylist_id || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: tenant_id, stylist_id, date.' });
+        return res.status(400).json({ error: 'Faltan parámetros.' });
     }
 
     try {
-        // --- Paso 1: Obtener el horario de la peluquería y las citas existentes del estilista para ese día ---
+        console.log("\n--- DEPURANDO getAvailability ---");
+        console.log(`Fecha recibida: ${date}, Estilista ID: ${stylist_id}`);
+
         const tenantPromise = db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenant_id]);
         const appointmentsPromise = db.query(
-            "SELECT start_time, end_time FROM appointments WHERE stylist_id = $1 AND start_time::date = $2",
+            "SELECT start_time, end_time FROM appointments WHERE stylist_id = $1 AND start_time::date = $2 AND status != 'cancelled'", 
             [stylist_id, date]
         );
-
         const [tenantResult, appointmentsResult] = await Promise.all([tenantPromise, appointmentsPromise]);
 
         if (tenantResult.rows.length === 0) {
             return res.status(404).json({ error: 'Tenant no encontrado.' });
         }
 
-        const workingHours = tenantResult.rows[0].working_hours;
-        const existingAppointments = appointmentsResult.rows;
+        const workingHours = tenantResult.rows[0].working_hours || {};
+        console.log("Horario de la peluquería:", workingHours);
 
-        // --- Paso 2: Generar todos los posibles slots de tiempo del día ---
-        const dayOfWeek = new Date(date).getDay();
-        const serviceDuration = 60; // Asumimos una duración estándar o podríamos pasarla como query param
+        const existingAppointments = appointmentsResult.rows;
+        console.log("Citas existentes para este día:", existingAppointments);
+
+        const dayOfWeek = new Date(date).getUTCDay(); // Usamos getUTCDay para consistencia
+        console.log(`Día de la semana (0=Dom, 6=Sab): ${dayOfWeek}`);
+        const serviceDuration = 60;
         const allSlots = [];
         
         let hoursRange;
         if (dayOfWeek >= 1 && dayOfWeek <= 5) hoursRange = workingHours.lunes_a_viernes;
         else if (dayOfWeek === 6) hoursRange = workingHours.sabado;
+        console.log(`Rango de horas para este día: ${hoursRange}`);
 
         if (hoursRange) {
             const [openTime, closeTime] = hoursRange.split('-');
-            let currentTime = new Date(`${date}T${openTime}:00`);
-            const closeDateTime = new Date(`${date}T${closeTime}:00`);
+            // Importante: Creamos las fechas en UTC para evitar problemas de zona horaria
+            let currentTime = new Date(`${date}T${openTime}:00.000Z`);
+            const closeDateTime = new Date(`${date}T${closeTime}:00.000Z`);
 
+            console.log(`Generando slots desde ${currentTime.toISOString()} hasta ${closeDateTime.toISOString()}`);
             while (currentTime < closeDateTime) {
                 allSlots.push(new Date(currentTime));
                 currentTime.setMinutes(currentTime.getMinutes() + serviceDuration);
             }
         }
-
-        // --- Paso 3: Filtrar los slots que están ocupados ---
+        console.log(`Total de slots generados antes de filtrar: ${allSlots.length}`);
+        
         const availableSlots = allSlots.filter(slot => {
             const slotEnd = new Date(slot.getTime() + serviceDuration * 60000);
-            // Un slot está disponible si NO se solapa con ninguna cita existente
             return !existingAppointments.some(appt => {
                 const apptStart = new Date(appt.start_time);
                 const apptEnd = new Date(appt.end_time);
-                return (slot < apptEnd && slotEnd > apptStart);
+                const isOverlapping = (slot < apptEnd && slotEnd > apptStart);
+                // Si encontramos un solapamiento, lo imprimimos para saber por qué se descarta un slot
+                if (isOverlapping) {
+                    console.log(`Slot descartado ${slot.toISOString()} porque se solapa con la cita de ${apptStart.toISOString()} a ${apptEnd.toISOString()}`);
+                }
+                return isOverlapping;
             });
         });
+        console.log(`Total de slots disponibles después de filtrar: ${availableSlots.length}`);
+        console.log("--- FIN DE LA DEPURACIÓN ---\n");
 
         res.status(200).json({ availableSlots });
 
