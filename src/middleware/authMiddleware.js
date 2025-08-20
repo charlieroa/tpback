@@ -1,3 +1,4 @@
+// src/middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
 
 module.exports = function(req, res, next) {
@@ -14,12 +15,10 @@ module.exports = function(req, res, next) {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Asignación explícita
+    // El payload del token debe incluir { user: { id, tenant_id, ... } }
     req.user = decoded.user;
-    
-    // Devolvemos el control para que continúe la siguiente función
-    return next();
 
+    return next();
   } catch (err) {
     return res.status(401).json({ message: 'Token no válido.' });
   }

@@ -1,101 +1,115 @@
-// src/controllers/appointmentController.js
+// Contenido COMPLETO y FINAL para: src/controllers/appointmentController.js
+
 const db = require('../config/db');
 
-// REEMPLAZA esta función en: src/controllers/appointmentController.js
+// --- CREACIÓN DE CITAS ---
 
-// En src/controllers/appointmentController.js
-
+// Crear UNA SOLA cita
 exports.createAppointment = async (req, res) => {
-    const { stylist_id, service_id, start_time } = req.body;
-    const client_id = req.body.client_id || req.user.id;
-    const { tenant_id } = req.user;
+    const { stylist_id, service_id, start_time, client_id: clientIdFromRequest } = req.body;
+    const { tenant_id, id: clientIdFromToken } = req.user;
+    const final_client_id = clientIdFromRequest || clientIdFromToken;
 
-    if (!stylist_id || !service_id || !start_time || !client_id) {
+    if (!stylist_id || !service_id || !start_time || !final_client_id) {
         return res.status(400).json({ error: 'Faltan campos obligatorios.' });
     }
 
     try {
-        // --- PASO 1: DEFINIR FECHAS Y DURACIÓN (CORRECCIÓN) ---
-        // Movemos esta lógica al principio para que las variables existan.
-        const serviceResult = await db.query('SELECT duration_minutes FROM services WHERE id = $1 AND tenant_id = $2', [service_id, tenant_id]);
-        if (serviceResult.rows.length === 0) {
-            return res.status(404).json({ error: 'El servicio especificado no existe para esta peluquería.' });
+        const skillCheck = await db.query('SELECT 1 FROM stylist_services WHERE user_id = $1 AND service_id = $2', [stylist_id, service_id]);
+        if (skillCheck.rowCount === 0) {
+            return res.status(400).json({ error: "El estilista no está cualificado para este servicio." });
         }
-        const duration = serviceResult.rows[0].duration_minutes;
+
+        const serviceRes = await db.query('SELECT duration_minutes FROM services WHERE id = $1', [service_id]);
+        if (serviceRes.rows.length === 0) return res.status(404).json({ error: 'Servicio no encontrado.'});
+        const duration = serviceRes.rows[0].duration_minutes;
         const startTimeDate = new Date(start_time);
         const endTimeDate = new Date(startTimeDate.getTime() + duration * 60000);
 
-
-        // --- PASO 2: VALIDACIÓN DE SOLAPAMIENTO ---
-        const overlappingAppointment = await db.query(
-            `SELECT id FROM appointments
-             WHERE stylist_id = $1 AND status != 'cancelled'
-               AND (start_time, end_time) OVERLAPS ($2, $3)`,
+        const overlap = await db.query(
+            `SELECT id FROM appointments WHERE stylist_id = $1 AND status != 'cancelled' AND (start_time, end_time) OVERLAPS ($2, $3)`,
             [stylist_id, startTimeDate, endTimeDate]
         );
-
-        if (overlappingAppointment.rows.length > 0) {
-            return res.status(409).json({ error: 'Conflicto de horario. El estilista ya tiene una cita en ese rango de tiempo.' });
+        if (overlap.rowCount > 0) {
+            return res.status(409).json({ error: 'Conflicto de horario para el estilista.' });
         }
-
-
-        // --- PASO 3: VALIDACIÓN DE HORARIO LABORAL ---
-        // (Tu lógica de validación de horario se queda igual aquí)
-        // ...
-
-
-        // --- PASO 4: INSERTAR LA CITA ---
-        const insertResult = await db.query(
-            'INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-            [tenant_id, client_id, stylist_id, service_id, startTimeDate, endTimeDate, 'scheduled']
-        );
-
-        const newAppointmentId = insertResult.rows[0].id;
-
-        // --- PASO 5: DEVOLVER LA CITA "ENRIQUECIDA" ---
-        const finalAppointmentQuery = `
-            SELECT 
-                a.id, a.start_time, a.end_time, a.status,
-                s.name as service_name,
-                c.first_name as client_first_name
-            FROM appointments a
-            JOIN services s ON a.service_id = s.id
-            JOIN users c ON a.client_id = c.id
-            WHERE a.id = $1
-        `;
-        const finalResult = await db.query(finalAppointmentQuery, [newAppointmentId]);
         
-        res.status(201).json(finalResult.rows[0]);
-
+        const result = await db.query(
+            'INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+            [tenant_id, final_client_id, stylist_id, service_id, startTimeDate, endTimeDate, 'scheduled']
+        );
+        res.status(201).json(result.rows[0]);
     } catch (error) {
-        console.error('Error al crear la cita:', error);
+        console.error('Error al crear la cita:', error.message);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 };
 
+// ✅ NUEVA FUNCIÓN: Crear MÚLTIPLES citas en una sola transacción
+exports.createAppointmentsBatch = async (req, res) => {
+    const { appointments, client_id: clientIdFromRequest } = req.body;
+    const { tenant_id, id: clientIdFromToken } = req.user;
+    const final_client_id = clientIdFromRequest || clientIdFromToken;
 
-// Las otras funciones del controlador no necesitan cambios, pero las dejamos para que el archivo esté completo.
-// Puedes reemplazar la función entera exports.getAppointmentsByTenant con esta versión
-
-exports.getAppointmentsByTenant = async (req, res) => {
-    const { tenantId } = req.params;
-    const { startDate, endDate } = req.query; 
-
-    if (!startDate || !endDate) {
-        return res.status(400).json({ error: 'Debe proporcionar un rango de fechas (startDate, endDate).' });
+    if (!Array.isArray(appointments) || appointments.length === 0) {
+        return res.status(400).json({ error: "El body debe contener un array 'appointments' con al menos una cita." });
+    }
+    if (!final_client_id) {
+        return res.status(400).json({ error: "No se pudo determinar el cliente." });
     }
 
     try {
-        // --- CONSULTA CORREGIDA ---
+        await db.query('BEGIN');
+        const createdAppointments = [];
+
+        for (const appt of appointments) {
+            const { stylist_id, service_id, start_time } = appt;
+            if (!stylist_id || !service_id || !start_time) throw new Error("Cada cita debe tener stylist_id, service_id y start_time.");
+
+            const skillCheck = await db.query('SELECT 1 FROM stylist_services WHERE user_id = $1 AND service_id = $2', [stylist_id, service_id]);
+            if (skillCheck.rowCount === 0) throw new Error(`El estilista no está cualificado para uno de los servicios.`);
+            
+            const serviceRes = await db.query('SELECT duration_minutes FROM services WHERE id = $1', [service_id]);
+            if (serviceRes.rows.length === 0) throw new Error(`Servicio con id ${service_id} no encontrado.`);
+            const duration = serviceRes.rows[0].duration_minutes;
+            const startTimeDate = new Date(start_time);
+            const endTimeDate = new Date(startTimeDate.getTime() + duration * 60000);
+
+            const overlap = await db.query(
+                `SELECT id FROM appointments WHERE stylist_id = $1 AND status != 'cancelled' AND (start_time, end_time) OVERLAPS ($2, $3)`,
+                [stylist_id, startTimeDate, endTimeDate]
+            );
+            if (overlap.rowCount > 0) throw new Error(`Conflicto de horario para uno de los servicios.`);
+            
+            const result = await db.query(
+                'INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+                [tenant_id, final_client_id, stylist_id, service_id, startTimeDate, endTimeDate, 'scheduled']
+            );
+            createdAppointments.push(result.rows[0]);
+        }
+
+        await db.query('COMMIT');
+        res.status(201).json(createdAppointments);
+
+    } catch (error) {
+        await db.query('ROLLBACK');
+        console.error("Error al crear citas en lote:", error.message);
+        res.status(400).json({ error: error.message });
+    }
+};
+
+
+// --- OBTENCIÓN DE CITAS Y DISPONIBILIDAD ---
+exports.getAppointmentsByTenant = async (req, res) => {
+    const { tenantId } = req.params;
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate) { return res.status(400).json({ error: 'Debe proporcionar un rango de fechas (startDate, endDate).' }); }
+    try {
         const query = `
-            SELECT
-                a.id, a.start_time, a.end_time, a.status,
-                a.service_id,
-                a.stylist_id,
-                a.client_id,
-                s.name as service_name, s.price,
-                client.first_name as client_first_name, client.last_name as client_last_name,
-                stylist.first_name as stylist_first_name, stylist.last_name as stylist_last_name
+            SELECT a.id, a.start_time, a.end_time, a.status, a.service_id, a.stylist_id, a.client_id,
+                   s.name as service_name, s.price,
+                   client.first_name as client_first_name, client.last_name as client_last_name,
+                   stylist.first_name as stylist_first_name, stylist.last_name as stylist_last_name
             FROM appointments a
             JOIN services s ON a.service_id = s.id
             JOIN users client ON a.client_id = client.id
@@ -103,8 +117,6 @@ exports.getAppointmentsByTenant = async (req, res) => {
             WHERE a.tenant_id = $1 AND a.start_time >= $2 AND a.start_time <= $3
             ORDER BY a.start_time;
         `;
-        // --- FIN DE LA CORRECCIÓN ---
-
         const result = await db.query(query, [tenantId, startDate, endDate]);
         res.status(200).json(result.rows);
     } catch (error) {
@@ -113,23 +125,86 @@ exports.getAppointmentsByTenant = async (req, res) => {
     }
 };
 
+exports.getAvailability = async (req, res) => {
+    const { tenant_id, stylist_id, date } = req.query;
+    if (!tenant_id || !stylist_id || !date) { return res.status(400).json({ error: 'Faltan parámetros.' }); }
+    try {
+        const tenantPromise = db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenant_id]);
+        const appointmentsPromise = db.query("SELECT start_time, end_time FROM appointments WHERE stylist_id = $1 AND start_time::date = $2 AND status != 'cancelled'", [stylist_id, date]);
+        const [tenantResult, appointmentsResult] = await Promise.all([tenantPromise, appointmentsPromise]);
+        if (tenantResult.rows.length === 0) { return res.status(404).json({ error: 'Tenant no encontrado.' }); }
+        
+        const workingHours = tenantResult.rows[0].working_hours || {};
+        const existingAppointments = appointmentsResult.rows;
+        const dayOfWeek = new Date(date).getUTCDay();
+        const serviceDuration = 60;
+        const allSlots = [];
+        let hoursRange;
+        if (dayOfWeek >= 1 && dayOfWeek <= 5) hoursRange = workingHours.lunes_a_viernes;
+        else if (dayOfWeek === 6) hoursRange = workingHours.sabado;
+        
+        if (hoursRange) {
+            const [openTime, closeTime] = hoursRange.split('-');
+            let currentTime = new Date(`${date}T${openTime}:00.000Z`);
+            const closeDateTime = new Date(`${date}T${closeTime}:00.000Z`);
+            while (currentTime < closeDateTime) {
+                allSlots.push(new Date(currentTime));
+                currentTime.setMinutes(currentTime.getMinutes() + serviceDuration);
+            }
+        }
+        
+        const availableSlots = allSlots.filter(slot => {
+            const slotEnd = new Date(slot.getTime() + serviceDuration * 60000);
+            return !existingAppointments.some(appt => {
+                const apptStart = new Date(appt.start_time);
+                const apptEnd = new Date(appt.end_time);
+                return (slot < apptEnd && slotEnd > apptStart);
+            });
+        });
+        res.status(200).json({ availableSlots });
+    } catch (error) {
+        console.error('Error al obtener disponibilidad:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+};
+
+// --- MANEJO DE ESTADOS DE CITA ---
+exports.handleCheckIn = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await db.query("UPDATE appointments SET status = 'checked_in', updated_at = NOW() WHERE id = $1 AND status IN ('scheduled', 'rescheduled') RETURNING *", [id]);
+        if (result.rows.length === 0) { return res.status(404).json({ message: 'Cita no encontrada o en un estado no válido para hacer check-in.' }); }
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error al hacer check-in:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+};
+
+exports.handleCheckout = async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query('BEGIN');
+        const appointmentResult = await db.query("UPDATE appointments SET status = 'checked_out', updated_at = NOW() WHERE id = $1 AND status = 'checked_in' RETURNING stylist_id, *", [id]);
+        if (appointmentResult.rows.length === 0) { throw new Error('Cita no encontrada o en un estado no válido para hacer check-out.'); }
+        const { stylist_id } = appointmentResult.rows[0];
+        await db.query("UPDATE users SET last_service_at = NOW() WHERE id = $1", [stylist_id]);
+        await db.query('COMMIT');
+        res.status(200).json(appointmentResult.rows[0]);
+    } catch (error) {
+        await db.query('ROLLBACK');
+        console.error('Error al hacer check-out:', error.message);
+        res.status(400).json({ error: error.message });
+    }
+};
 
 exports.updateAppointmentStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
-
-    if (!status) {
-        return res.status(400).json({ error: 'Debe proporcionar un nuevo estado (status).' });
-    }
-
+    if (!status) { return res.status(400).json({ error: 'Debe proporcionar un nuevo estado (status).' }); }
     try {
-        const result = await db.query(
-            'UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-            [status, id]
-        );
-        if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'Cita no encontrada para actualizar.' });
-        }
+        const result = await db.query('UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *', [status, id]);
+        if (result.rows.length === 0) { return res.status(404).json({ message: 'Cita no encontrada para actualizar.' }); }
         res.status(200).json(result.rows[0]);
     } catch (error) {
         console.error('Error al actualizar la cita:', error);
@@ -141,144 +216,10 @@ exports.deleteAppointment = async (req, res) => {
     const { id } = req.params;
     try {
         const result = await db.query('DELETE FROM appointments WHERE id = $1', [id]);
-        if (result.rowCount === 0) {
-            return res.status(404).json({ message: 'Cita no encontrada para eliminar' });
-        }
+        if (result.rowCount === 0) { return res.status(404).json({ message: 'Cita no encontrada para eliminar' }); }
         res.status(204).send();
     } catch (error) {
         console.error('Error al eliminar la cita:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
-    }
-};
-
-// AÑADIR ESTA NUEVA FUNCIÓN AL FINAL DEL ARCHIVO
-// REEMPLAZA la función getAvailability en appointmentController.js
-
-// REEMPLAZA la función getAvailability con esta versión de DEPURACIÓN
-
-exports.getAvailability = async (req, res) => {
-    const { tenant_id, stylist_id, date } = req.query;
-
-    if (!tenant_id || !stylist_id || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros.' });
-    }
-
-    try {
-        console.log("\n--- DEPURANDO getAvailability ---");
-        console.log(`Fecha recibida: ${date}, Estilista ID: ${stylist_id}`);
-
-        const tenantPromise = db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenant_id]);
-        const appointmentsPromise = db.query(
-            "SELECT start_time, end_time FROM appointments WHERE stylist_id = $1 AND start_time::date = $2 AND status != 'cancelled'", 
-            [stylist_id, date]
-        );
-        const [tenantResult, appointmentsResult] = await Promise.all([tenantPromise, appointmentsPromise]);
-
-        if (tenantResult.rows.length === 0) {
-            return res.status(404).json({ error: 'Tenant no encontrado.' });
-        }
-
-        const workingHours = tenantResult.rows[0].working_hours || {};
-        console.log("Horario de la peluquería:", workingHours);
-
-        const existingAppointments = appointmentsResult.rows;
-        console.log("Citas existentes para este día:", existingAppointments);
-
-        const dayOfWeek = new Date(date).getUTCDay(); // Usamos getUTCDay para consistencia
-        console.log(`Día de la semana (0=Dom, 6=Sab): ${dayOfWeek}`);
-        const serviceDuration = 60;
-        const allSlots = [];
-        
-        let hoursRange;
-        if (dayOfWeek >= 1 && dayOfWeek <= 5) hoursRange = workingHours.lunes_a_viernes;
-        else if (dayOfWeek === 6) hoursRange = workingHours.sabado;
-        console.log(`Rango de horas para este día: ${hoursRange}`);
-
-        if (hoursRange) {
-            const [openTime, closeTime] = hoursRange.split('-');
-            // Importante: Creamos las fechas en UTC para evitar problemas de zona horaria
-            let currentTime = new Date(`${date}T${openTime}:00.000Z`);
-            const closeDateTime = new Date(`${date}T${closeTime}:00.000Z`);
-
-            console.log(`Generando slots desde ${currentTime.toISOString()} hasta ${closeDateTime.toISOString()}`);
-            while (currentTime < closeDateTime) {
-                allSlots.push(new Date(currentTime));
-                currentTime.setMinutes(currentTime.getMinutes() + serviceDuration);
-            }
-        }
-        console.log(`Total de slots generados antes de filtrar: ${allSlots.length}`);
-        
-        const availableSlots = allSlots.filter(slot => {
-            const slotEnd = new Date(slot.getTime() + serviceDuration * 60000);
-            return !existingAppointments.some(appt => {
-                const apptStart = new Date(appt.start_time);
-                const apptEnd = new Date(appt.end_time);
-                const isOverlapping = (slot < apptEnd && slotEnd > apptStart);
-                // Si encontramos un solapamiento, lo imprimimos para saber por qué se descarta un slot
-                if (isOverlapping) {
-                    console.log(`Slot descartado ${slot.toISOString()} porque se solapa con la cita de ${apptStart.toISOString()} a ${apptEnd.toISOString()}`);
-                }
-                return isOverlapping;
-            });
-        });
-        console.log(`Total de slots disponibles después de filtrar: ${availableSlots.length}`);
-        console.log("--- FIN DE LA DEPURACIÓN ---\n");
-
-        res.status(200).json({ availableSlots });
-
-    } catch (error) {
-        console.error('Error al obtener disponibilidad:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-};
-
-exports.handleCheckIn = async (req, res) => {
-    const { id } = req.params;
-    try {
-        const result = await db.query(
-            "UPDATE appointments SET status = 'checked_in', updated_at = NOW() WHERE id = $1 AND status IN ('scheduled', 'rescheduled') RETURNING *",
-            [id]
-        );
-        if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'Cita no encontrada o en un estado no válido para hacer check-in.' });
-        }
-        res.status(200).json(result.rows[0]);
-    } catch (error) {
-        console.error('Error al hacer check-in:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-};
-
-// Reemplaza la función handleCheckout en: src/controllers/appointmentController.js
-exports.handleCheckout = async (req, res) => {
-    const { id } = req.params;
-    try {
-        await db.query('BEGIN');
-
-        // 1. Actualizar el estado de la cita a 'checked_out'
-        const appointmentResult = await db.query(
-            "UPDATE appointments SET status = 'checked_out', updated_at = NOW() WHERE id = $1 AND status = 'checked_in' RETURNING stylist_id",
-            [id]
-        );
-
-        if (appointmentResult.rows.length === 0) {
-            throw new Error('Cita no encontrada o en un estado no válido para hacer check-out.');
-        }
-
-        const { stylist_id } = appointmentResult.rows[0];
-
-        // 2. NUEVO: Actualizar la marca de tiempo del último servicio del estilista
-        await db.query(
-            "UPDATE users SET last_service_at = NOW() WHERE id = $1",
-            [stylist_id]
-        );
-
-        await db.query('COMMIT');
-        res.status(200).json({ message: 'Checkout realizado con éxito. El turno del estilista ha sido actualizado.' });
-
-    } catch (error) {
-        await db.query('ROLLBACK');
-        console.error('Error al hacer check-out:', error.message);
-        res.status(400).json({ error: error.message });
     }
 };

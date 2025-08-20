@@ -1,21 +1,47 @@
 // src/config/db.js
 
-// Cargar las variables de entorno desde el archivo .env
 require('dotenv').config();
-
-// Importar la clase Pool del paquete 'pg'
 const { Pool } = require('pg');
 
-// Configurar el pool de conexiones usando TUS variables de entorno
 const pool = new Pool({
-  user: process.env.PGUSER,       // Cambiado de DB_USER
-  host: process.env.PGHOST,       // Cambiado de DB_HOST
-  database: process.env.PGDATABASE, // Cambiado de DB_DATABASE
-  password: process.env.PGPASSWORD, // Cambiado de DB_PASSWORD
-  port: process.env.PGPORT,         // Cambiado de DB_PORT
+  user: process.env.PGUSER,
+  host: process.env.PGHOST,
+  database: process.env.PGDATABASE,
+  password: process.env.PGPASSWORD,
+  port: Number(process.env.PGPORT),
+  // Opcional según proveedor:
+  // ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
+  // connectionTimeoutMillis: 10000,
+  // idleTimeoutMillis: 30000,
+  // max: 10,
 });
 
-// Exportar una función para hacer consultas.
-module.exports = {
-  query: (text, params) => pool.query(text, params),
+// Consulta simple (usa el pool normalmente)
+const query = (text, params) => pool.query(text, params);
+
+// Helper para ejecutar un bloque en UNA MISMA conexión con BEGIN/COMMIT/ROLLBACK
+// Uso en controllers (batch):
+// await db.withTransaction(async (client) => {
+//   await client.query('INSERT ...');
+//   await client.query('UPDATE ...');
+//   return true;
+// });
+const withTransaction = async (callback) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
 };
+
+// Si alguna vez quieres manejar manualmente el cliente fuera de withTransaction
+const getClient = () => pool.connect();
+
+module.exports = { pool, query, withTransaction, getClient };
