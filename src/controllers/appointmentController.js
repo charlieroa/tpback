@@ -16,6 +16,9 @@ const BLOCKING_STATUSES = [
   'pending_approval'
 ];
 
+// Mapa de días: Date.getDay() -> clave en JSON
+const DAY_KEYS = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+
 // Obtiene duración (minutos) del servicio; si no existe, usa fallback
 async function getServiceDurationMinutes(service_id, fallback = 60) {
   if (!service_id) return fallback;
@@ -30,6 +33,70 @@ function makeLocalDate(dateStr, timeStr) {
   const t = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
   // Esto crea un Date interpretado en la zona horaria local del servidor
   return new Date(`${dateStr}T${t}`);
+}
+
+// -------------------------------
+// Helpers de Horarios
+// -------------------------------
+
+// Normaliza el objeto working_hours para un día concreto, soportando:
+// 1) Nuevo formato por día: { active: bool, ranges: ["08:00-12:00","13:00-17:00"] }
+// 2) Formato simple por día: { active: bool, open: "08:00", close: "17:00" }
+// 3) Formato legado: lunes_a_viernes / sabado / domingo como "08:00-20:00"
+function getDayRangesFromWorkingHours(workingHours, dateStr) {
+  // Determinar día de la semana a partir de la fecha (LOCAL)
+  const jsDow = new Date(`${dateStr}T00:00:00`).getDay(); // 0..6
+  const dayKey = DAY_KEYS[jsDow];
+
+  if (!workingHours || typeof workingHours !== 'object') return [];
+
+  // --- 1) NUEVO FORMATO POR DÍA ---
+  const dayObj = workingHours[dayKey];
+  if (dayObj && typeof dayObj === 'object') {
+    // { active: true/false, ranges: [...] }  ó  { active, open, close }
+    if (dayObj.active === false) return [];
+    if (Array.isArray(dayObj.ranges) && dayObj.ranges.length > 0) {
+      return dayObj.ranges; // ["08:00-12:00", "13:00-17:00"]
+    }
+    if (dayObj.open && dayObj.close) {
+      return [`${dayObj.open}-${dayObj.close}`];
+    }
+  }
+
+  // --- 2) FORMATO LEGADO (lunes_a_viernes / sabado / domingo) ---
+  let legacyRange = null;
+  if (jsDow >= 1 && jsDow <= 5 && workingHours.lunes_a_viernes) {
+    legacyRange = workingHours.lunes_a_viernes; // "08:00-20:00"
+  } else if (jsDow === 6 && workingHours.sabado) {
+    legacyRange = workingHours.sabado;
+  } else if (jsDow === 0 && workingHours.domingo) {
+    legacyRange = workingHours.domingo;
+  }
+
+  if (legacyRange && typeof legacyRange === 'string' && legacyRange.includes('-')) {
+    return [legacyRange];
+  }
+
+  return [];
+}
+
+// Genera slots a partir de un arreglo de rangos ["HH:mm-HH:mm", ...]
+// stepMinutes = duración real del servicio
+function buildSlotsFromRanges(dateStr, ranges, stepMinutes) {
+  const slots = [];
+  for (const range of ranges) {
+    const [openTime, closeTime] = range.split('-').map(s => s.trim());
+    if (!openTime || !closeTime) continue;
+
+    let current = makeLocalDate(dateStr, openTime);
+    const closeDateTime = makeLocalDate(dateStr, closeTime);
+
+    while (current < closeDateTime) {
+      slots.push(new Date(current));
+      current.setMinutes(current.getMinutes() + stepMinutes);
+    }
+  }
+  return slots;
 }
 
 // -------------------------------
@@ -173,6 +240,7 @@ exports.createAppointmentsBatch = async (req, res) => {
     return res.status(400).json({ error: error.message });
   }
 };
+
 exports.updateAppointment = async (req, res) => {
   const { id } = req.params;
   const { stylist_id, service_id, start_time } = req.body;
@@ -274,6 +342,7 @@ exports.updateAppointment = async (req, res) => {
     return res.status(500).json({ error: "Error interno del servidor" });
   }
 };
+
 // -------------------------------
 // OBTENCIÓN DE CITAS
 // -------------------------------
@@ -337,7 +406,15 @@ exports.getAvailability = async (req, res) => {
     }
     const workingHours = tenantResult.rows[0].working_hours || {};
 
-    // 3) Citas existentes del estilista ese día (estados que bloquean)
+    // 3) Determinar rangos del día (nuevo formato por día o legado)
+    const dayRanges = getDayRangesFromWorkingHours(workingHours, date);
+
+    // Si el día no está activo o no hay rangos, no hay disponibilidad
+    if (!Array.isArray(dayRanges) || dayRanges.length === 0) {
+      return res.status(200).json({ availableSlots: [] });
+    }
+
+    // 4) Citas existentes del estilista ese día (estados que bloquean)
     const appointmentsResult = await db.query(
       `
         SELECT start_time, end_time
@@ -350,28 +427,10 @@ exports.getAvailability = async (req, res) => {
     );
     const existingAppointments = appointmentsResult.rows;
 
-    // 4) Determinar rango de trabajo para ese día (LOCAL)
-    // getDay(): 0 = domingo, 1 = lunes, ..., 6 = sábado
-    const jsDow = new Date(`${date}T00:00:00`).getDay();
-    let hoursRange = null;
-    if (jsDow >= 1 && jsDow <= 5) hoursRange = workingHours.lunes_a_viernes;
-    else if (jsDow === 6) hoursRange = workingHours.sabado;
-    else if (jsDow === 0) hoursRange = workingHours.domingo; // si lo manejas
+    // 5) Generar todos los slots con step = duración real del servicio
+    const allSlots = buildSlotsFromRanges(date, dayRanges, serviceDuration);
 
-    const allSlots = [];
-    if (hoursRange) {
-      const [openTime, closeTime] = hoursRange.split('-'); // "08:00-20:00"
-      let current = makeLocalDate(date, openTime);
-      const closeDateTime = makeLocalDate(date, closeTime);
-
-      // Genera slots con step = duración real del servicio
-      while (current < closeDateTime) {
-        allSlots.push(new Date(current));
-        current.setMinutes(current.getMinutes() + serviceDuration);
-      }
-    }
-
-    // 5) Filtrar por solapes con citas existentes
+    // 6) Filtrar por solapes con citas existentes
     const availableSlots = allSlots.filter((slot) => {
       const slotEnd = new Date(slot.getTime() + serviceDuration * 60000);
       return !existingAppointments.some((appt) => {
@@ -381,7 +440,7 @@ exports.getAvailability = async (req, res) => {
       });
     });
 
-    // Puedes devolver ISO o Date; tu front los normaliza a HH:mm
+    // Devuelve ISO; el front podrá formatear a HH:mm
     return res.status(200).json({ availableSlots });
   } catch (error) {
     console.error('Error al obtener disponibilidad:', error);
