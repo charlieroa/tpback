@@ -6,16 +6,16 @@ const authMiddleware = require('../middleware/authMiddleware');
 const stylistController = require('../controllers/stylistController');
 
 /**
- * GET /api/stylists/next-available
- * Siguiente estilista en la cola global (sin filtrar por servicio/horario)
+ * IMPORTANTE: el orden de rutas específicas va antes
+ * de las rutas con parámetros para evitar colisiones.
  */
-router.get('/next-available', authMiddleware, stylistController.getNextAvailable);
 
-/**
- * GET /api/stylists/suggest-by-turn
- * Query: date=YYYY-MM-DD&start_time=HH:mm[:ss]&service_id=<id>
- * Sugiere estilista calificado y disponible y actualiza last_turn_at
- */
+// EXISTENTES
+router.get('/next-available', authMiddleware, stylistController.getNextAvailable);
 router.get('/suggest-by-turn', authMiddleware, stylistController.suggestStylistByTurn);
+
+// NUEVAS: servicios por estilista
+router.get('/:id/services', authMiddleware, stylistController.getStylistServices);
+router.post('/:id/services', authMiddleware, stylistController.setStylistServices);
 
 module.exports = router;

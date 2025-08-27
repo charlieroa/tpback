@@ -1,25 +1,25 @@
 // src/controllers/stylistController.js
 const db = require('../config/db');
 
-// -------------------------------
-// Utilidades compartidas
-// -------------------------------
+/* ============================================================
+   Utilidades compartidas
+============================================================ */
 
-// Estados que BLOQUEAN disponibilidad
-// (si no quieres que 'pending_approval' bloquee, elimínalo de la lista)
 const BLOCKING_STATUSES = [
   'scheduled',
   'rescheduled',
   'checked_in',
   'checked_out',
-  'pending_approval'
+  'pending_approval',
 ];
 
-// Obtiene duración (minutos) del servicio; si no existe, usa fallback
+// Obtiene la duración del servicio (minutos) por tenant; si no existe, usa fallback
 async function getServiceDurationMinutes(service_id, tenant_id, fallback = 60) {
   if (!service_id) return fallback;
   const res = await db.query(
-    'SELECT duration_minutes FROM services WHERE id = $1 AND tenant_id = $2',
+    `SELECT duration_minutes
+       FROM services
+      WHERE id = $1 AND tenant_id = $2`,
     [service_id, tenant_id]
   );
   if (res.rows.length === 0) return fallback;
@@ -29,28 +29,26 @@ async function getServiceDurationMinutes(service_id, tenant_id, fallback = 60) {
 
 // Construye Date local (sin 'Z') a partir de YYYY-MM-DD + HH:mm (o HH:mm:ss)
 function makeLocalDate(dateStr, timeStr) {
-  const t = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
-  // Interpretado en zona local del servidor
+  const t = (timeStr || '').length === 5 ? `${timeStr}:00` : (timeStr || '00:00:00');
   return new Date(`${dateStr}T${t}`);
 }
 
-/**
- * GET /api/stylists/next-available
- * Siguiente estilista en la cola global (sin filtrar por servicio ni horario).
- * Ordena por la “antigüedad de turno” global: primero last_turn_at, si no existe usa last_service_at.
- */
+/* ============================================================
+   1) Siguiente estilista disponible global (sin filtrar por servicio)
+   GET /api/stylists/next-available
+============================================================ */
 exports.getNextAvailable = async (req, res) => {
   const { tenant_id } = req.user;
   try {
     const result = await db.query(
       `
       SELECT id, first_name, last_name, last_service_at, last_turn_at
-      FROM users
-      WHERE tenant_id = $1
-        AND role_id = 3
-        AND status = 'active'
-      ORDER BY COALESCE(last_turn_at, last_service_at) ASC NULLS FIRST
-      LIMIT 1;
+        FROM users
+       WHERE tenant_id = $1
+         AND role_id = 3
+         AND status = 'active'
+       ORDER BY COALESCE(last_turn_at, last_service_at) ASC NULLS FIRST
+       LIMIT 1
       `,
       [tenant_id]
     );
@@ -65,56 +63,52 @@ exports.getNextAvailable = async (req, res) => {
   }
 };
 
-/**
- * GET /api/stylists/suggest-by-turn
- * Sugerir estilista calificado y disponible para (fecha, hora, servicio),
- * ordenando por la cola global (COALESCE(last_turn_at, last_service_at)).
- * Después de sugerir, actualiza last_turn_at = NOW() para moverlo al final de la cola.
- * Query params: date=YYYY-MM-DD, start_time=HH:mm[:ss], service_id=<id>
- */
+/* ============================================================
+   2) Sugerir estilista por turno (calificado + disponible)
+   GET /api/stylists/suggest-by-turn?date=YYYY-MM-DD&start_time=HH:mm[:ss]&service_id=<id>
+   - Ordena por COALESCE(last_turn_at, last_service_at)
+   - Actualiza last_turn_at = NOW() al sugerir
+============================================================ */
 exports.suggestStylistByTurn = async (req, res) => {
   const { tenant_id } = req.user;
   const { date, start_time, service_id } = req.query;
 
   if (!date || !start_time || !service_id) {
-    return res.status(400).json({ message: 'Se requiere fecha, hora de inicio y servicio.' });
+    return res.status(400).json({ message: 'Se requiere fecha, hora de inicio y service_id.' });
   }
 
   try {
-    // 1) Duración real del servicio (por tenant)
+    // 1) Duración real del servicio
     const duration = await getServiceDurationMinutes(service_id, tenant_id, 60);
 
     // 2) Ventana de tiempo (LOCAL)
     const startLocal = makeLocalDate(date, start_time);
     const endLocal = new Date(startLocal.getTime() + duration * 60000);
 
-    // 3) Buscar estilista calificado, disponible y más “antiguo” en la cola global
-    //    - skills: stylist_services.user_id (unificado con createAppointment)
-    //    - disponibilidad: sin solape con estados bloqueantes
-    //    - por tenant en appointments
+    // 3) Buscar estilista calificado y disponible
     const suggested = await db.query(
       `
       SELECT u.id, u.first_name, u.last_name
-      FROM users u
-      WHERE u.tenant_id = $1
-        AND u.role_id = 3
-        AND u.status = 'active'
-        AND EXISTS (
-          SELECT 1
-          FROM stylist_services ss
-          WHERE ss.user_id   = u.id
-            AND ss.service_id = $2
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM appointments a
-          WHERE a.tenant_id  = $1
-            AND a.stylist_id = u.id
-            AND a.status = ANY($5)
-            AND (a.start_time, a.end_time) OVERLAPS ($3, $4)
-        )
-      ORDER BY COALESCE(u.last_turn_at, u.last_service_at) ASC NULLS FIRST
-      LIMIT 1;
+        FROM users u
+       WHERE u.tenant_id = $1
+         AND u.role_id = 3
+         AND u.status = 'active'
+         AND EXISTS ( -- calificado para el servicio
+               SELECT 1
+                 FROM stylist_services ss
+                WHERE ss.user_id = u.id
+                  AND ss.service_id = $2
+         )
+         AND NOT EXISTS ( -- sin solape con citas bloqueantes
+               SELECT 1
+                 FROM appointments a
+                WHERE a.tenant_id  = $1
+                  AND a.stylist_id = u.id
+                  AND a.status = ANY($5)
+                  AND (a.start_time, a.end_time) OVERLAPS ($3, $4)
+         )
+       ORDER BY COALESCE(u.last_turn_at, u.last_service_at) ASC NULLS FIRST
+       LIMIT 1
       `,
       [tenant_id, service_id, startLocal, endLocal, BLOCKING_STATUSES]
     );
@@ -125,10 +119,8 @@ exports.suggestStylistByTurn = async (req, res) => {
 
     const stylist = suggested.rows[0];
 
-    // 4) Moverlo al final de la cola global (para todas sus categorías)
-    //    Si prefieres mover solo al crear la cita, comenta esta línea;
-    //    pero asegúrate de que en createAppointment ya estás actualizando last_turn_at (lo hicimos).
-    await db.query('UPDATE users SET last_turn_at = NOW() WHERE id = $1', [stylist.id]);
+    // 4) Mover al final de la cola
+    await db.query(`UPDATE users SET last_turn_at = NOW() WHERE id = $1`, [stylist.id]);
 
     return res.status(200).json(stylist);
   } catch (error) {
@@ -136,3 +128,281 @@ exports.suggestStylistByTurn = async (req, res) => {
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
+
+/* ============================================================
+   3) Obtener servicios asignados a un estilista
+   GET /api/stylists/:id/services
+============================================================ */
+exports.getStylistServices = async (req, res) => {
+  const { tenant_id } = req.user;
+  const { id: stylistId } = req.params;
+
+  try {
+    // Verifica estilista del tenant
+    const u = await db.query(
+      `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
+      [stylistId, tenant_id]
+    );
+    if (u.rows.length === 0) {
+      return res.status(404).json({ message: 'Estilista no encontrado.' });
+    }
+
+    // Trae servicios del estilista (solo de su tenant)
+    const result = await db.query(
+      `
+      SELECT s.id, s.name, s.price, s.duration_minutes, s.category_id, c.name AS category_name
+        FROM stylist_services ss
+        JOIN services s ON s.id = ss.service_id
+   LEFT JOIN service_categories c ON c.id = s.category_id
+       WHERE ss.user_id = $1
+         AND s.tenant_id = $2
+       ORDER BY c.name NULLS LAST, s.name ASC
+      `,
+      [stylistId, tenant_id]
+    );
+
+    return res.status(200).json(result.rows);
+  } catch (error) {
+    console.error('Error al obtener servicios del estilista:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+/* ============================================================
+   4) Asignar (reemplazar) servicios a un estilista
+   POST /api/stylists/:id/services
+   Body: { "service_ids": ["uuid1","uuid2", ...] }
+   - Reemplaza todas las asignaciones actuales por las recibidas
+============================================================ */
+exports.setStylistServices = async (req, res) => {
+  const { tenant_id } = req.user;
+  const { id: stylistId } = req.params;
+  const { service_ids } = req.body;
+
+  if (!Array.isArray(service_ids)) {
+    return res.status(400).json({ message: 'service_ids debe ser un arreglo.' });
+  }
+
+  try {
+    await db.withTransaction(async (client) => {
+      // 1) Verificar estilista del tenant
+      const u = await client.query(
+        `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
+        [stylistId, tenant_id]
+      );
+      if (u.rows.length === 0) {
+        const err = new Error('Estilista no encontrado.');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      // 2) Verificar que los servicios pertenezcan al tenant
+      if (service_ids.length > 0) {
+        const valid = await client.query(
+          `SELECT id
+             FROM services
+            WHERE tenant_id = $1
+              AND id = ANY($2::uuid[])`,
+          [tenant_id, service_ids]
+        );
+        if (valid.rows.length !== service_ids.length) {
+          const err = new Error('Uno o más servicios no pertenecen a tu tenant.');
+          err.statusCode = 400;
+          throw err;
+        }
+      }
+
+      // 3) Limpiar asignaciones actuales
+      await client.query(`DELETE FROM stylist_services WHERE user_id = $1`, [stylistId]);
+
+      // 4) Insertar nuevas asignaciones (bulk insert)
+      if (service_ids.length > 0) {
+        const values = service_ids.map((_, i) => `($1, $${i + 2})`).join(', ');
+        await client.query(
+          `INSERT INTO stylist_services (user_id, service_id) VALUES ${values}`,
+          [stylistId, ...service_ids]
+        );
+      }
+    });
+
+    return res.status(200).json({ message: 'Servicios del estilista actualizados con éxito.' });
+  } catch (error) {
+    console.error('Error al asignar servicios al estilista:', error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({ error: error.message || 'Error interno del servidor' });
+  }
+};
+
+/* ============================================================
+   5) Crear estilista (role_id = 3)
+   POST /api/users
+   Body: { first_name, last_name, email, password, phone?, payment_type?, base_salary?, commission_rate? }
+   * tenant_id se toma de req.user (ignora el del body)
+============================================================ */
+exports.createStylist = async (req, res) => {
+  const { tenant_id } = req.user;
+  const {
+    first_name,
+    last_name,
+    email,
+    password,
+    phone = null,
+    payment_type = 'salary', // 'salary' | 'commission' | 'mixed' (según tu modelo)
+    base_salary = 0,
+    commission_rate = 0,
+  } = req.body;
+
+  if (!first_name || !last_name || !email || !password) {
+    return res.status(400).json({ message: 'first_name, last_name, email y password son requeridos.' });
+  }
+
+  try {
+    // TODO: hashear password si aún no lo haces en otro lugar
+    const result = await db.query(
+      `
+      INSERT INTO users (tenant_id, role_id, first_name, last_name, email, password, phone,
+                         payment_type, base_salary, commission_rate, status)
+      VALUES ($1, 3, $2, $3, $4, $5, $6, $7, $8, $9, 'active')
+      RETURNING id, tenant_id, role_id, first_name, last_name, email, phone, payment_type, base_salary, commission_rate, status, created_at, updated_at
+      `,
+      [tenant_id, first_name, last_name, email, password, phone, payment_type, base_salary, commission_rate]
+    );
+
+    return res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error al crear estilista:', error);
+    // Manejo básico de duplicados por email
+    if (String(error.message).includes('duplicate key')) {
+      return res.status(409).json({ error: 'El email ya está registrado.' });
+    }
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+/* ============================================================
+   6) Listar estilistas del tenant
+   GET /api/users/tenant/:tenantId?role_id=3
+   (Se valida que :tenantId === req.user.tenant_id)
+============================================================ */
+exports.listStylistsByTenant = async (req, res) => {
+  const { tenant_id } = req.user;
+  const { tenantId } = req.params;
+  const roleId = Number(req.query.role_id || 3);
+
+  if (tenantId !== tenant_id) {
+    return res.status(403).json({ message: 'No autorizado para consultar este tenant.' });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      SELECT id, first_name, last_name, email, phone, payment_type, base_salary, commission_rate, status, created_at, updated_at
+        FROM users
+       WHERE tenant_id = $1
+         AND role_id = $2
+       ORDER BY first_name, last_name
+      `,
+      [tenant_id, roleId]
+    );
+    return res.status(200).json(result.rows);
+  } catch (error) {
+    console.error('Error al listar estilistas:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+/* ============================================================
+   7) Actualizar estilista
+   PUT /api/users/:id
+============================================================ */
+exports.updateStylist = async (req, res) => {
+  const { tenant_id } = req.user;
+  const { id } = req.params;
+
+  const allowed = [
+    'first_name',
+    'last_name',
+    'email',
+    'phone',
+    'payment_type',
+    'base_salary',
+    'commission_rate',
+    'status',
+  ];
+
+  const fields = [];
+  const values = [];
+  let idx = 1;
+
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+      fields.push(`${key} = $${idx++}`);
+      values.push(req.body[key]);
+    }
+  }
+
+  if (fields.length === 0) {
+    return res.status(400).json({ message: 'No hay campos válidos para actualizar.' });
+  }
+
+  try {
+    // Verifica pertenencia al tenant y role_id=3
+    const u = await db.query(
+      `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
+      [id, tenant_id]
+    );
+    if (u.rows.length === 0) {
+      return res.status(404).json({ message: 'Estilista no encontrado.' });
+    }
+
+    const result = await db.query(
+      `
+      UPDATE users
+         SET ${fields.join(', ')}, updated_at = NOW()
+       WHERE id = $${idx} AND tenant_id = $${idx + 1} AND role_id = 3
+   RETURNING id, tenant_id, role_id, first_name, last_name, email, phone, payment_type, base_salary, commission_rate, status, created_at, updated_at
+      `,
+      [...values, id, tenant_id]
+    );
+
+    return res.status(200).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error al actualizar estilista:', error);
+    if (String(error.message).includes('duplicate key')) {
+      return res.status(409).json({ error: 'El email ya está registrado.' });
+    }
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+/* ============================================================
+   8) Eliminar estilista
+   DELETE /api/users/:id
+   (ON DELETE CASCADE se encarga de stylist_services)
+============================================================ */
+exports.deleteStylist = async (req, res) => {
+  const { tenant_id } = req.user;
+  const { id } = req.params;
+
+  try {
+    // Verifica pertenencia al tenant y role_id=3
+    const u = await db.query(
+      `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
+      [id, tenant_id]
+    );
+    if (u.rows.length === 0) {
+      return res.status(404).json({ message: 'Estilista no encontrado.' });
+    }
+
+    await db.query(`DELETE FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`, [id, tenant_id]);
+    return res.status(204).send();
+  } catch (error) {
+    console.error('Error al eliminar estilista:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+/* ============================================================
+   Export util (opcional)
+============================================================ */
+exports.BLOCKING_STATUSES = BLOCKING_STATUSES;
