@@ -1,68 +1,76 @@
-// Contenido COMPLETO y DEFINITIVO para: src/controllers/paymentController.js
-
+// src/controllers/paymentController.js
 const db = require('../config/db');
 
 /**
  * Crea un pago y marca la cita como 'completed'
  */
 exports.createPayment = async (req, res) => {
-  // 1. Extraer datos del Body y del Token
   const { appointment_id, amount, payment_method } = req.body;
-  
+
   if (!req.user || !req.user.id || !req.user.tenant_id) {
     return res.status(403).json({ error: 'Fallo de autenticación: req.user no está correctamente definido.' });
   }
   const { tenant_id, id: cashier_id } = req.user;
 
-  // 2. Validaciones de entrada
   if (!appointment_id || !amount) {
     return res.status(400).json({ error: 'Los campos appointment_id y amount son obligatorios.' });
   }
 
-  // 3. Iniciar la transacción de la base de datos
   try {
     await db.query('BEGIN');
 
-    // Paso A: Obtener y bloquear la cita para evitar problemas de concurrencia
+    // A) Obtener y bloquear la cita
     const apptRes = await db.query(
-        'SELECT status, tenant_id FROM appointments WHERE id = $1 FOR UPDATE', 
-        [appointment_id]
+      'SELECT status, tenant_id FROM appointments WHERE id = $1 FOR UPDATE',
+      [appointment_id]
     );
 
-    if (apptRes.rows.length === 0) {
-        throw new Error('Cita no encontrada.');
-    }
-    
-    // Paso B: Validar la lógica de negocio
+    if (apptRes.rows.length === 0) throw new Error('Cita no encontrada.');
+
     const appt = apptRes.rows[0];
     if (String(appt.tenant_id) !== String(tenant_id)) {
-        throw new Error('La cita no pertenece a esta peluquería.');
+      throw new Error('La cita no pertenece a esta peluquería.');
     }
     if (appt.status !== 'checked_out') {
-        throw new Error('El servicio debe estar en estado Checkout para poder ser pagado.');
+      throw new Error('El servicio debe estar en estado Checkout para poder ser pagado.');
     }
 
-    // Paso C: Insertar el registro del pago y guardarlo en la variable 'payRes'
+    // B) Insertar el registro del pago
     const payRes = await db.query(
       `INSERT INTO payments (tenant_id, appointment_id, amount, payment_method, cashier_id)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [tenant_id, appointment_id, Number(amount), payment_method || 'cash', cashier_id]
     );
 
-    // Paso D: Actualizar el estado de la cita a 'completed'
+    // C) Actualizar la cita a 'completed'
     await db.query(
-        'UPDATE appointments SET status = \'completed\', updated_at = NOW() WHERE id = $1',
-        [appointment_id]
+      `UPDATE appointments 
+       SET status = 'completed', updated_at = NOW() 
+       WHERE id = $1`,
+      [appointment_id]
     );
 
-    // Paso E: Si todo fue bien, confirmar los cambios
+    // D) Registrar movimiento de caja si es efectivo
+    const pm = (payment_method || 'cash').toLowerCase();
+    if (pm === 'cash') {
+      await db.query(
+        `INSERT INTO cash_movements
+          (tenant_id, user_id, type, description, amount, category, payment_method, related_entity_type, related_entity_id)
+         VALUES ($1,$2,'income',$3,$4,'service_payment','cash','appointment',$5)`,
+        [
+          tenant_id,
+          cashier_id,
+          `Pago cita #${appointment_id}`,
+          Math.abs(Number(amount)),   // ingreso positivo
+          appointment_id
+        ]
+      );
+    }
+
     await db.query('COMMIT');
-    
-    // Paso F: Devolver la respuesta de éxito con los datos del pago creado
     res.status(201).json(payRes.rows[0]);
 
   } catch (error) {
-    // Si algo falla, deshacer todos los cambios
     await db.query('ROLLBACK');
     console.error('Error al crear el pago:', error.message);
     res.status(400).json({ error: error.message });

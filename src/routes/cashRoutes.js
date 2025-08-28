@@ -1,14 +1,20 @@
+// =============================================
+// File: src/routes/cashRoutes.js
+// =============================================
 const express = require('express');
 const router = express.Router();
-const cashController = require('../controllers/cashcontroller');
+const cashController = require('../controllers/cashController'); // ojo: C mayúscula
 const authMiddleware = require('../middleware/authMiddleware');
 
 // Todas las rutas de caja requieren autenticación
+router.use(authMiddleware);
 
-// POST /api/cash-movements -> Crear un nuevo movimiento de caja
-router.post('/', authMiddleware, cashController.createCashMovement);
+// Crear un nuevo movimiento de caja
+// POST /api/cash-movements
+router.post('/', cashController.createCashMovement);
 
-// GET /api/cash-movements -> Obtener la lista de movimientos de caja
-router.get('/', authMiddleware, cashController.getCashMovements);
+// Obtener la lista de movimientos de caja (con filtros opcionales)
+// GET /api/cash-movements?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+router.get('/', cashController.getCashMovements);
 
 module.exports = router;

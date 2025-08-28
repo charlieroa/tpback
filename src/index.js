@@ -1,3 +1,6 @@
+// =============================================
+// File: src/app.js  (o server.js)
+// =============================================
 const express = require('express');
 const cors = require('cors');
 const db = require('./config/db');
@@ -13,6 +16,7 @@ const payrollRoutes = require('./routes/payrollRoutes');
 const stylistRoutes = require('./routes/stylistRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const authRoutes = require('./routes/authRoutes');
+const cashRoutes = require('./routes/cashRoutes'); // 👈 NUEVA IMPORTACIÓN
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,7 +24,6 @@ const PORT = process.env.PORT || 3000;
 // =======================================
 // 🛡️ CONFIGURACIÓN DE CORS PARA LOCAL Y PRODUCCIÓN
 // =======================================
-
 const allowedOrigins = [
   'http://localhost:3001',           // desarrollo local
   'https://tpia.tupelukeria.com'     // producción
@@ -36,7 +39,7 @@ app.use(cors({
       return callback(new Error('No permitido por CORS: ' + origin));
     }
   },
-  credentials: true // ⚠️ Necesario para cookies o headers de auth (e.g., JWT)
+  credentials: true // ⚠️ Necesario para cookies o headers de auth (JWT)
 }));
 
 // =======================================
@@ -64,6 +67,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/payrolls', payrollRoutes);
 app.use('/api/stylists', stylistRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/cash-movements', cashRoutes); // 👈 AQUÍ REGISTRAS LA NUEVA RUTA
 
 // =======================================
 // ▶️ INICIAR SERVIDOR
