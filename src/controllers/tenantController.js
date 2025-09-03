@@ -1,4 +1,3 @@
-// src/controllers/tenantController.js
 const db = require('../config/db');
 const slugify = require('slugify');
 
@@ -83,10 +82,10 @@ exports.createTenant = async (req, res) => {
 
     const result = await db.query(
       `INSERT INTO tenants
-        (name, address, phone, working_hours, slug, email, website, logo_url, tax_rate, admin_fee_rate)
-       VALUES
-        ($1,   $2,      $3,    $4,            $5,   $6,    $7,      $8,       $9,        $10)
-       RETURNING *`,
+         (name, address, phone, working_hours, slug, email, website, logo_url, tax_rate, admin_fee_rate)
+        VALUES
+         ($1,   $2,      $3,    $4,              $5,   $6,      $7,      $8,        $9,            $10)
+        RETURNING *`,
       [
         clean(name),
         clean(address),
@@ -162,8 +161,8 @@ exports.updateTenant = async (req, res) => {
       email = prev.rows[0].email,
       website = prev.rows[0].website,
       logo_url = prev.rows[0].logo_url,
-      iva_rate,            // porcentaje desde front (opcional)
-      admin_fee_percent,   // porcentaje desde front (opcional)
+      iva_rate,
+      admin_fee_percent,
     } = req.body;
 
     const slug = createSlug(name);
@@ -176,11 +175,9 @@ exports.updateTenant = async (req, res) => {
       email: clean(email),
       website: clean(website),
       logo_url: clean(logo_url),
-      // si vienen definidos, convertimos; si no, dejamos lo existente
       tax_rate: iva_rate !== undefined ? pctToFrac(iva_rate) : prev.rows[0].tax_rate,
       admin_fee_rate:
         admin_fee_percent !== undefined ? pctToFrac(admin_fee_percent) : prev.rows[0].admin_fee_rate,
-      // working_hours a JSON si es objeto
       working_hours: working_hours
         ? (typeof working_hours === 'string' ? working_hours : JSON.stringify(working_hours))
         : null,
@@ -196,6 +193,43 @@ exports.updateTenant = async (req, res) => {
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
+
+// NUEVO: Endpoint para subir y actualizar el logo del tenant
+exports.uploadTenantLogo = async (req, res) => {
+    // NUEVO: Capturar el ID del tenant de los parámetros de la URL
+    const { tenantId } = req.params;
+
+    try {
+        // Asumiendo que `req.file` es el objeto del archivo subido por Multer
+        if (!req.file) {
+            return res.status(400).json({ message: 'No se ha subido ningún archivo.' });
+        }
+
+        // Aquí debes construir la URL final del archivo subido.
+        // Por ejemplo, si usas una configuración de Multer que guarda en `/public/uploads/logos`
+        const uploadedFileUrl = `/uploads/logos/${req.file.filename}`;
+
+        // Verificar que el tenant exista antes de actualizar
+        const tenantExists = await db.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
+        if (tenantExists.rowCount === 0) {
+            return res.status(404).json({ message: 'Tenant no encontrado.' });
+        }
+
+        // Actualizar la base de datos con la nueva URL del logo
+        await db.query(
+            'UPDATE tenants SET logo_url = $1, updated_at = NOW() WHERE id = $2',
+            [uploadedFileUrl, tenantId]
+        );
+
+        // Devolver la URL completa para que el frontend la use
+        return res.status(200).json({ url: uploadedFileUrl });
+
+    } catch (error) {
+        console.error('Error al subir el logo:', error);
+        return res.status(500).json({ error: 'Error interno del servidor.' });
+    }
+};
+
 
 // Eliminar
 exports.deleteTenant = async (req, res) => {

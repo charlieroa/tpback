@@ -2,137 +2,144 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 
-/* =========================================================
-   Helpers de horarios (acepta llaves en español o inglés)
-   Estructura canónica (inglés):
-   {
-     "monday":    { "open":"09:00", "close":"17:00", "active": true },
-     "tuesday":   { ... },
-     ...
-     "sunday":    { ... }
-   }
-========================================================= */
+// Helpers de horarios centralizados
+const {
+  normalizeWorkingHours,
+  intersectRangesArrays,
+  normalizeDayValueToRanges,
+} = require('../helpers/timeHelpers');
 
-const DAY_KEYS_EN = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
-const DAY_KEYS_ES = ["lunes","martes","miercoles","miércoles","jueves","viernes","sabado","sábado","domingo"];
+/* ===========================================
+   Utilidades locales
+=========================================== */
+const safeJSON = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-const ES_TO_EN = {
-  "lunes": "monday",
-  "martes": "tuesday",
-  "miercoles": "wednesday",
-  "miércoles": "wednesday",
-  "jueves": "thursday",
-  "viernes": "friday",
-  "sabado": "saturday",
-  "sábado": "saturday",
-  "domingo": "sunday",
+const dbToApiUser = (row) => ({
+  id: row.id,
+  tenant_id: row.tenant_id,
+  role_id: row.role_id,
+  first_name: row.first_name,
+  last_name: row.last_name,
+  email: row.email,
+  phone: row.phone,
+  payment_type: row.payment_type,
+  base_salary: row.base_salary,
+  commission_rate: row.commission_rate,
+  status: row.status,
+  last_service_at: row.last_service_at,
+  last_turn_at: row.last_turn_at,
+  // Puede venir string JSON o json o null
+  working_hours: typeof row.working_hours === 'string'
+    ? safeJSON(row.working_hours)
+    : row.working_hours ?? null,
+});
+
+const minutesFromHHMM = (hhmm) => {
+  if (!hhmm || typeof hhmm !== 'string') return null;
+  const [h, m] = hhmm.split(':').map(n => parseInt(n, 10));
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
 };
 
-// Valida HH:mm
-function isHHmm(s) {
-  if (typeof s !== "string") return false;
-  const m = s.match(/^(\d{2}):(\d{2})$/);
-  if (!m) return false;
-  const hh = +m[1], mm = +m[2];
-  return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
-}
+/* ===========================================
+   Validación: horario de estilista dentro del tenant
+=========================================== */
+const validateStylistWorkingHoursAgainstTenant = async (tenantId, stylistHours) => {
+  if (!stylistHours) return; // hereda o sin horario
 
-// Normaliza un objeto week con llaves ES/EN a EN y valida
-function normalizeWorkingHours(input) {
-  if (!input || typeof input !== "object") return null;
-  const out = {};
-  for (const k of Object.keys(input)) {
-    const low = k.toLowerCase();
-    const enKey = ES_TO_EN[low] || low; // si viene en inglés, queda igual
-    if (!DAY_KEYS_EN.includes(enKey)) continue;
+  // 1) Horario del tenant
+  const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantId]);
+  const tenantWorkingHours = tenantResult.rows[0]?.working_hours;
 
-    const v = input[k] || {};
-    const active = !!v.active;
+  // Si el tenant no tiene horario definido, no validamos contra nada.
+  if (!tenantWorkingHours) return;
 
-    let open = v.open ?? v.start ?? v.inicio ?? null;
-    let close = v.close ?? v.end ?? v.fin ?? null;
+  const tenantDays = Object.keys(tenantWorkingHours);
+  for (const day of tenantDays) {
+    const sDay = stylistHours?.[day];
+    const tDay = tenantWorkingHours?.[day];
 
-    // si viene "cerrado", forzamos inactive
-    if (typeof v === "string" && v.toLowerCase().includes("cerrad")) {
-      out[enKey] = { active: false, open: null, close: null };
-      continue;
+    // Si el estilista marca activo y el salón no, error
+    if (sDay?.active && !tDay?.active) {
+      throw new Error(`El estilista no puede trabajar el ${day} si el salón está cerrado.`);
     }
 
-    // saneo
-    if (active) {
-      if (!isHHmm(open) || !isHHmm(close)) {
-        throw new Error(`Horario inválido para ${enKey}: formato HH:mm requerido`);
-      }
-      // open < close
-      const [oh, om] = open.split(":").map(Number);
-      const [ch, cm] = close.split(":").map(Number);
-      if (ch*60+cm <= oh*60+om) {
-        throw new Error(`Horario inválido para ${enKey}: close debe ser mayor que open`);
-      }
-      out[enKey] = { active: true, open, close };
-    } else {
-      out[enKey] = { active: false, open: null, close: null };
+    const stylistRanges = normalizeDayValueToRanges(sDay);
+    const tenantRanges  = normalizeDayValueToRanges(tDay);
+    const commonRanges  = intersectRangesArrays(stylistRanges, tenantRanges);
+
+    if (sDay?.active && commonRanges.length === 0) {
+      throw new Error(`El horario del estilista el ${day} no coincide con el horario del salón.`);
     }
   }
-
-  // Rellenar faltantes con inactive
-  for (const d of DAY_KEYS_EN) {
-    if (!out[d]) out[d] = { active: false, open: null, close: null };
-  }
-  return out;
-}
+};
 
 /* =========================================================
    Crear un nuevo Usuario
+   - Respeta working_hours = null (herencia)
 ========================================================= */
 exports.createUser = async (req, res) => {
   const {
     tenant_id, role_id, first_name, last_name,
     email, password, phone,
     payment_type, base_salary, commission_rate,
-    working_hours // <- opcional (JSON)
+    working_hours,
   } = req.body;
+
+  const isStylist = parseInt(role_id, 10) === 3;
 
   if (!tenant_id || !role_id || !first_name || !email || !password) {
     return res.status(400).json({ error: 'Faltan campos obligatorios.' });
+  }
+  if (isStylist && !tenant_id) {
+    return res.status(400).json({ error: 'Faltan campos obligatorios para crear un estilista.' });
   }
 
   try {
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
 
+    // working_hours: null => hereda; objeto => normalizar y validar
     let wh = null;
-    if (working_hours) {
+    if (working_hours !== undefined && working_hours !== null) {
       try {
         wh = normalizeWorkingHours(working_hours);
+        if (isStylist) {
+          await validateStylistWorkingHoursAgainstTenant(tenant_id, wh);
+        }
       } catch (e) {
         return res.status(400).json({ error: e.message || 'working_hours inválido' });
       }
-    }
+    } // si viene undefined o null => null (hereda)
 
     const result = await db.query(
       `INSERT INTO users (
-         tenant_id, role_id, first_name, last_name, email, password_hash, phone,
-         payment_type, base_salary, commission_rate, working_hours
-       )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING id, tenant_id, role_id, email, first_name, last_name, payment_type, working_hours`,
+        tenant_id, role_id, first_name, last_name, email, password_hash, phone,
+        payment_type, base_salary, commission_rate, working_hours
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      RETURNING id, tenant_id, role_id, email, first_name, last_name, payment_type, base_salary, commission_rate, working_hours`,
       [
-        tenant_id, role_id, first_name, last_name || null, email, password_hash, phone || null,
+        tenant_id,
+        role_id,
+        first_name,
+        last_name || null,
+        email,
+        password_hash,
+        phone || null,
         payment_type || null,
         payment_type === 'salary' ? (base_salary ?? 0) : 0,
         payment_type === 'commission' ? (commission_rate ?? null) : null,
-        wh
+        wh,
       ]
     );
 
-    res.status(201).json(result.rows[0]);
+    return res.status(201).json(dbToApiUser(result.rows[0]));
   } catch (error) {
     console.error('Error al crear usuario:', error);
     if (error.code === '23505') {
       return res.status(409).json({ error: 'El correo electrónico ya está registrado.' });
     }
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
@@ -143,8 +150,12 @@ exports.getAllUsersByTenant = async (req, res) => {
   const { tenantId } = req.params;
   const { role_id } = req.query;
 
-  let baseQuery = `
-    SELECT id, role_id, first_name, last_name, email, phone, created_at,
+  if (!tenantId) {
+    return res.status(400).json({ error: 'El ID del tenant es obligatorio.' });
+  }
+
+  let sql = `
+    SELECT id, tenant_id, role_id, first_name, last_name, email, phone, created_at,
            status, last_service_at, payment_type, base_salary, commission_rate
     FROM users
     WHERE tenant_id = $1
@@ -152,18 +163,18 @@ exports.getAllUsersByTenant = async (req, res) => {
   const params = [tenantId];
 
   if (role_id) {
-    baseQuery += ' AND role_id = $2';
+    sql += ' AND role_id = $2';
     params.push(parseInt(role_id, 10));
   }
 
-  baseQuery += ' ORDER BY first_name';
+  sql += ' ORDER BY first_name';
 
   try {
-    const result = await db.query(baseQuery, params);
-    res.status(200).json(result.rows);
+    const r = await db.query(sql, params);
+    return res.status(200).json(r.rows.map(dbToApiUser));
   } catch (error) {
     console.error('Error al obtener usuarios:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
@@ -173,83 +184,123 @@ exports.getAllUsersByTenant = async (req, res) => {
 exports.getUserById = async (req, res) => {
   const { id } = req.params;
   try {
-    const result = await db.query(
+    const r = await db.query(
       `SELECT id, tenant_id, role_id, first_name, last_name, email, phone, created_at,
-              payment_type, base_salary, commission_rate, status, last_service_at, working_hours
+              payment_type, base_salary, commission_rate, status, last_service_at, last_turn_at,
+              working_hours
        FROM users
        WHERE id = $1`,
       [id]
     );
-    if (result.rows.length === 0) {
+    if (r.rows.length === 0) {
       return res.status(404).json({ message: 'Usuario no encontrado' });
     }
-    res.status(200).json(result.rows[0]);
+    return res.status(200).json(dbToApiUser(r.rows[0]));
   } catch (error) {
     console.error('Error al obtener usuario por ID:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
 /* =========================================================
-   Actualizar un Usuario (permite actualizar working_hours)
+   Actualizar un Usuario
+   - Respeta working_hours = null (hereda)
+   - No pisa salario/comisión si no cambias payment_type
 ========================================================= */
 exports.updateUser = async (req, res) => {
   const { id } = req.params;
   const {
     first_name, last_name, phone, role_id,
     payment_type, base_salary, commission_rate, status,
-    working_hours // <- opcional
-  } = req.body;
-
-  let wh = undefined; // no tocar por defecto
-  if (working_hours !== undefined) {
-    // Permitir setear a null para usar horario del tenant
-    if (working_hours === null) {
-      wh = null;
-    } else {
-      try {
-        wh = normalizeWorkingHours(working_hours);
-      } catch (e) {
-        return res.status(400).json({ error: e.message || 'working_hours inválido' });
-      }
-    }
-  }
-
-  // Construir dinámicamente el UPDATE
-  const fields = [
-    ['first_name', first_name],
-    ['last_name', last_name ?? null],
-    ['phone', phone ?? null],
-    ['role_id', role_id],
-    ['payment_type', payment_type ?? null],
-    ['base_salary', (payment_type === 'salary') ? (base_salary ?? 0) : 0],
-    ['commission_rate', (payment_type === 'commission') ? (commission_rate ?? null) : null],
-    ['status', status ?? null],
-  ];
-
-  if (wh !== undefined) {
-    fields.push(['working_hours', wh]);
-  }
-
-  const sets = fields.map((f, i) => `${f[0]} = $${i+1}`).join(', ') + ', updated_at = NOW()';
-  const values = fields.map(f => f[1]);
-  values.push(id);
+    working_hours,
+  } = req.body || {};
 
   try {
-    const result = await db.query(
-      `UPDATE users SET ${sets}
-       WHERE id = $${values.length}
-       RETURNING id, tenant_id, role_id, first_name, last_name, email, phone,
-                 payment_type, base_salary, commission_rate, status, working_hours`,
-      values
+    // Traer estado actual para tomar decisiones
+    const curRes = await db.query(
+      `SELECT tenant_id, role_id, payment_type AS cur_payment_type,
+              base_salary AS cur_base_salary, commission_rate AS cur_commission_rate
+       FROM users WHERE id = $1`,
+      [id]
     );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Usuario no encontrado para actualizar' });
+    if (curRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
     }
-    res.status(200).json(result.rows[0]);
+
+    const { tenant_id, role_id: curRoleId, cur_payment_type, cur_base_salary, cur_commission_rate } = curRes.rows[0];
+
+    // ¿Estilista?
+    const nextRoleId = role_id ?? curRoleId;
+    const isStylist = parseInt(nextRoleId, 10) === 3;
+
+    // working_hours: undefined => no tocar; null => hereda; objeto => normalizar + validar
+    let wh = undefined;
+    if (working_hours !== undefined) {
+      if (working_hours === null) {
+        wh = null; // hereda
+      } else {
+        try {
+          wh = normalizeWorkingHours(working_hours);
+          if (isStylist) {
+            await validateStylistWorkingHoursAgainstTenant(tenant_id, wh);
+          }
+        } catch (e) {
+          return res.status(400).json({ error: e.message || 'working_hours inválido' });
+        }
+      }
+    }
+
+    // Construcción dinámica del UPDATE
+    const fields = [];
+    const values = [];
+
+    const push = (k, v) => { fields.push(`${k} = $${fields.length + 1}`); values.push(v); };
+
+    if (first_name !== undefined) push('first_name', first_name);
+    if (last_name  !== undefined) push('last_name', last_name);
+    if (phone      !== undefined) push('phone', phone);
+    if (role_id    !== undefined) push('role_id', role_id);
+    if (status     !== undefined) push('status', status);
+
+    // Lógica de pagos:
+    if (payment_type !== undefined) {
+      // Cambia tipo de pago: forzar consistencia de montos
+      push('payment_type', payment_type);
+      if (payment_type === 'salary') {
+        push('base_salary', base_salary ?? cur_base_salary ?? 0);
+        push('commission_rate', null);
+      } else if (payment_type === 'commission') {
+        push('base_salary', 0);
+        push('commission_rate', commission_rate ?? cur_commission_rate ?? null);
+      } else {
+        // tipo desconocido -> limpia ambos
+        push('base_salary', 0);
+        push('commission_rate', null);
+      }
+    } else {
+      // No cambia el tipo => solo actualiza si me pasan explícitamente
+      if (base_salary !== undefined) push('base_salary', base_salary);
+      if (commission_rate !== undefined) push('commission_rate', commission_rate);
+    }
+
+    if (wh !== undefined) push('working_hours', wh);
+
+    if (fields.length === 0) {
+      // Nada que cambiar
+      return exports.getUserById(req, res);
+    }
+
+    // updated_at
+    fields.push(`updated_at = NOW()`);
+
+    const sql = `UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length + 1}
+                 RETURNING id, tenant_id, role_id, first_name, last_name, email, phone,
+                           payment_type, base_salary, commission_rate, status, last_service_at, last_turn_at, working_hours`;
+    const r = await db.query(sql, [...values, id]);
+    return res.status(200).json(dbToApiUser(r.rows[0]));
   } catch (error) {
     console.error('Error al actualizar usuario:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
@@ -259,19 +310,19 @@ exports.updateUser = async (req, res) => {
 exports.deleteUser = async (req, res) => {
   const { id } = req.params;
   try {
-    const result = await db.query('DELETE FROM users WHERE id = $1', [id]);
-    if (result.rowCount === 0) {
+    const r = await db.query('DELETE FROM users WHERE id = $1', [id]);
+    if (r.rowCount === 0) {
       return res.status(404).json({ message: 'Usuario no encontrado para eliminar' });
     }
-    res.status(204).send();
+    return res.status(204).send();
   } catch (error) {
     console.error('Error al eliminar usuario:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
 /* =========================================================
-   Endpoints específicos de Working Hours por usuario
+   Endpoints específicos de Working Hours
 ========================================================= */
 
 // GET /users/:id/working-hours
@@ -280,20 +331,29 @@ exports.getUserWorkingHours = async (req, res) => {
   try {
     const r = await db.query('SELECT working_hours FROM users WHERE id = $1', [id]);
     if (r.rows.length === 0) return res.status(404).json({ message: 'Usuario no encontrado' });
-    res.status(200).json(r.rows[0].working_hours || null);
+    return res.status(200).json(r.rows[0].working_hours || null);
   } catch (e) {
     console.error('Error al leer working_hours:', e);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
 // PUT /users/:id/working-hours
-// Body: { week: { monday:{active,open,close}, ... } }  (se acepta ES/EN)
 exports.updateUserWorkingHours = async (req, res) => {
   const { id } = req.params;
   const { week } = req.body || {};
   try {
     const wh = week === null ? null : normalizeWorkingHours(week);
+    const userRes = await db.query(`SELECT tenant_id, role_id FROM users WHERE id = $1`, [id]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    const { tenant_id, role_id } = userRes.rows[0];
+    const isStylist = parseInt(role_id, 10) === 3;
+    if (isStylist && wh) {
+      await validateStylistWorkingHoursAgainstTenant(tenant_id, wh);
+    }
+
     const r = await db.query(
       `UPDATE users
        SET working_hours = $1, updated_at = NOW()
@@ -302,76 +362,93 @@ exports.updateUserWorkingHours = async (req, res) => {
       [wh, id]
     );
     if (r.rows.length === 0) return res.status(404).json({ message: 'Usuario no encontrado' });
-    res.status(200).json(r.rows[0]);
+    return res.status(200).json(r.rows[0]);
   } catch (e) {
     console.error('Error al actualizar working_hours:', e);
-    res.status(400).json({ error: e.message || 'working_hours inválido' });
+    return res.status(400).json({ error: e.message || 'working_hours inválido' });
   }
 };
 
 /* =========================================================
    Siguiente estilista disponible (turnero + horario)
-   - role_id = 3 (estilistas)
-   - status = 'active'
-   - Orden por COALESCE(last_turn_at, last_service_at) ASC NULLS FIRST (si tienes last_turn_at)
-   - Excluye estilistas con working_hours "cerrado hoy" (si tienen JSON)
+   - Si working_hours es NULL => hereda horario del tenant
 ========================================================= */
 exports.getNextAvailableStylist = async (req, res) => {
-  // auth middleware debe anexar req.user.tenant_id
-  const { tenant_id } = req.user || {};
+  const tenant_id = req.user?.tenant_id;
   if (!tenant_id) {
     return res.status(400).json({ error: 'No se pudo identificar el tenant del usuario.' });
   }
 
-  // Día actual en inglés para mapear JSON (server timezone)
-  // Si necesitas TZ del tenant, ajusta con AT TIME ZONE en SQL.
   const now = new Date();
-  const dayIdx = now.getDay(); // 0=Dom..6=Sab
-  const DAY_EN = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"][dayIdx];
-
-  // Tomar la hora local del servidor en HH:mm
-  const hh = String(now.getHours()).padStart(2,'0');
-  const mm = String(now.getMinutes()).padStart(2,'0');
-  const curr = `${hh}:${mm}`;
-
-  // Construye una cláusula para evaluar JSONB:
-  // Permitimos:
-  //  - Usuarios sin working_hours -> se consideran "abiertos" (heredan tenant)
-  //  - Usuarios con working_hours -> deben tener active=true hoy y curr entre open-close
-  //
-  // NOTA: Comparamos como TIME; si open/close faltan, se descarta
-  const sql = `
-    SELECT id, first_name, last_name, last_service_at
-    FROM users
-    WHERE tenant_id = $1
-      AND role_id = 3
-      AND status = 'active'
-      AND (
-        working_hours IS NULL
-        OR (
-          (working_hours->'${DAY_EN}'->>'active')::boolean = TRUE
-          AND (working_hours->'${DAY_EN}'->>'open')  IS NOT NULL
-          AND (working_hours->'${DAY_EN}'->>'close') IS NOT NULL
-          AND (working_hours->'${DAY_EN}'->>'open')::time  <  (working_hours->'${DAY_EN}'->>'close')::time
-          AND $2::time >= (working_hours->'${DAY_EN}'->>'open')::time
-          AND $2::time <  (working_hours->'${DAY_EN}'->>'close')::time
-        )
-      )
-    ORDER BY
-      COALESCE(last_turn_at, last_service_at) ASC NULLS FIRST,
-      first_name ASC
-    LIMIT 1;
-  `;
+  const dayIdx = now.getDay(); // 0=Sunday..6=Saturday
+  const DAY_EN = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'][dayIdx];
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const nowMin = parseInt(hh, 10) * 60 + parseInt(mm, 10);
 
   try {
-    const result = await db.query(sql, [tenant_id, curr]);
-    if (result.rows.length === 0) {
+    // 1) Horario del tenant
+    const tRes = await db.query(`SELECT working_hours FROM tenants WHERE id = $1`, [tenant_id]);
+    const tenantWH = tRes.rows[0]?.working_hours || null;
+
+    // 2) Traer estilistas activos del tenant con sus horarios (pueden ser NULL -> heredan)
+    const uRes = await db.query(
+      `SELECT id, first_name, last_name, last_service_at, last_turn_at, working_hours
+       FROM users
+       WHERE tenant_id = $1 AND role_id = 3 AND status = 'active'
+       ORDER BY first_name ASC`,
+      [tenant_id]
+    );
+    const stylists = uRes.rows.map(dbToApiUser);
+
+    // 3) Calcular disponibilidad efectiva (herencia)
+    const available = [];
+    for (const u of stylists) {
+      const effectiveDay = (u.working_hours ?? tenantWH)?.[DAY_EN];
+
+      // Si no hay horario en ningún lado -> no disponible
+      if (!effectiveDay) continue;
+
+      // Si no está activo -> no disponible
+      const ranges = normalizeDayValueToRanges(effectiveDay); // [{start:'HH:MM', end:'HH:MM'}, ...] (asumido)
+      if (!effectiveDay.active || !Array.isArray(ranges) || ranges.length === 0) continue;
+
+      const isNowInside = ranges.some(r => {
+        const s = minutesFromHHMM(r.start);
+        const e = minutesFromHHMM(r.end);
+        return s != null && e != null && nowMin >= s && nowMin < e;
+      });
+
+      if (isNowInside) {
+        available.push(u);
+      }
+    }
+
+    if (available.length === 0) {
       return res.status(404).json({ message: 'No hay estilistas disponibles en este momento.' });
     }
-    res.status(200).json(result.rows[0]);
+
+    // 4) Orden: menos recientemente atendió/turno -> primero
+    available.sort((a, b) => {
+      const aKey = a.last_turn_at || a.last_service_at || null;
+      const bKey = b.last_turn_at || b.last_service_at || null;
+      const aTime = aKey ? new Date(aKey).getTime() : -Infinity;
+      const bTime = bKey ? new Date(bKey).getTime() : -Infinity;
+      if (aTime !== bTime) return aTime - bTime;
+      // tie-breaker por nombre
+      return String(a.first_name).localeCompare(String(b.first_name));
+    });
+
+    return res.status(200).json({
+      id: available[0].id,
+      first_name: available[0].first_name,
+      last_name: available[0].last_name,
+      last_service_at: available[0].last_service_at,
+      last_turn_at: available[0].last_turn_at,
+    });
   } catch (error) {
     console.error('Error al obtener el siguiente estilista disponible:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
@@ -380,30 +457,28 @@ exports.getNextAvailableStylist = async (req, res) => {
 ========================================================= */
 exports.getUserByPhone = async (req, res) => {
   const { phoneNumber } = req.params;
-  const { tenant_id } = req.user || {};
+  const tenant_id = req.user?.tenant_id;
 
   if (!phoneNumber) {
-    return res.status(400).json({ error: "Número de teléfono no proporcionado." });
+    return res.status(400).json({ error: 'Número de teléfono no proporcionado.' });
   }
   if (!tenant_id) {
-    return res.status(400).json({ error: "No se pudo identificar el tenant." });
+    return res.status(400).json({ error: 'No se pudo identificar el tenant.' });
   }
 
   try {
-    const result = await db.query(
+    const r = await db.query(
       `SELECT id, tenant_id, role_id, first_name, last_name, email
        FROM users
        WHERE phone = $1 AND tenant_id = $2`,
       [phoneNumber, tenant_id]
     );
-
-    if (result.rows.length === 0) {
+    if (r.rows.length === 0) {
       return res.status(404).json({ message: 'Usuario no encontrado con ese número de teléfono.' });
     }
-
-    res.status(200).json(result.rows[0]);
+    return res.status(200).json(dbToApiUser(r.rows[0]));
   } catch (error) {
     console.error('Error al buscar usuario por teléfono:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
