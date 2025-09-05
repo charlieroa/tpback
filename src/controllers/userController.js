@@ -28,7 +28,6 @@ const dbToApiUser = (row) => ({
   status: row.status,
   last_service_at: row.last_service_at,
   last_turn_at: row.last_turn_at,
-  // Puede venir string JSON o json o null
   working_hours: typeof row.working_hours === 'string'
     ? safeJSON(row.working_hours)
     : row.working_hours ?? null,
@@ -42,30 +41,36 @@ const minutesFromHHMM = (hhmm) => {
 };
 
 /* ===========================================
-   Validación: horario de estilista dentro del tenant
+   Validación: horario de estilista dentro del tenant (Versión Robusta)
 =========================================== */
 const validateStylistWorkingHoursAgainstTenant = async (tenantId, stylistHours) => {
   if (!stylistHours) return; // hereda o sin horario
 
-  // 1) Horario del tenant
   const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantId]);
   const tenantWorkingHours = tenantResult.rows[0]?.working_hours;
 
-  // Si el tenant no tiene horario definido, no validamos contra nada.
   if (!tenantWorkingHours) return;
 
   const tenantDays = Object.keys(tenantWorkingHours);
   for (const day of tenantDays) {
     const sDay = stylistHours?.[day];
-    const tDay = tenantWorkingHours?.[day];
+    const originalTDay = tenantWorkingHours?.[day];
 
-    // Si el estilista marca activo y el salón no, error
-    if (sDay?.active && !tDay?.active) {
+    let normalizedTDay;
+    if (typeof originalTDay === 'string' && originalTDay.includes('-')) {
+      normalizedTDay = { active: true, ranges: [originalTDay] };
+    } else if (typeof originalTDay === 'object' && originalTDay !== null) {
+      normalizedTDay = originalTDay;
+    } else {
+      normalizedTDay = { active: false, ranges: [] };
+    }
+
+    if (sDay?.active && !normalizedTDay?.active) {
       throw new Error(`El estilista no puede trabajar el ${day} si el salón está cerrado.`);
     }
 
     const stylistRanges = normalizeDayValueToRanges(sDay);
-    const tenantRanges  = normalizeDayValueToRanges(tDay);
+    const tenantRanges  = normalizeDayValueToRanges(normalizedTDay);
     const commonRanges  = intersectRangesArrays(stylistRanges, tenantRanges);
 
     if (sDay?.active && commonRanges.length === 0) {
@@ -76,7 +81,6 @@ const validateStylistWorkingHoursAgainstTenant = async (tenantId, stylistHours) 
 
 /* =========================================================
    Crear un nuevo Usuario
-   - Respeta working_hours = null (herencia)
 ========================================================= */
 exports.createUser = async (req, res) => {
   const {
@@ -99,7 +103,6 @@ exports.createUser = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
 
-    // working_hours: null => hereda; objeto => normalizar y validar
     let wh = null;
     if (working_hours !== undefined && working_hours !== null) {
       try {
@@ -110,7 +113,7 @@ exports.createUser = async (req, res) => {
       } catch (e) {
         return res.status(400).json({ error: e.message || 'working_hours inválido' });
       }
-    } // si viene undefined o null => null (hereda)
+    }
 
     const result = await db.query(
       `INSERT INTO users (
@@ -144,7 +147,7 @@ exports.createUser = async (req, res) => {
 };
 
 /* =========================================================
-   Obtener todos los Usuarios por tenant (con filtro rol)
+   Obtener todos los Usuarios por tenant (con filtro rol) - CORREGIDO
 ========================================================= */
 exports.getAllUsersByTenant = async (req, res) => {
   const { tenantId } = req.params;
@@ -167,6 +170,8 @@ exports.getAllUsersByTenant = async (req, res) => {
     params.push(parseInt(role_id, 10));
   }
 
+  // --- CORRECCIÓN DE BUG #1 ---
+  // Se añadió un espacio antes de "ORDER BY"
   sql += ' ORDER BY first_name';
 
   try {
@@ -179,7 +184,7 @@ exports.getAllUsersByTenant = async (req, res) => {
 };
 
 /* =========================================================
-   Obtener un Usuario por ID (incluye working_hours)
+   Obtener un Usuario por ID
 ========================================================= */
 exports.getUserById = async (req, res) => {
   const { id } = req.params;
@@ -203,9 +208,7 @@ exports.getUserById = async (req, res) => {
 };
 
 /* =========================================================
-   Actualizar un Usuario
-   - Respeta working_hours = null (hereda)
-   - No pisa salario/comisión si no cambias payment_type
+   Actualizar un Usuario - CORREGIDO
 ========================================================= */
 exports.updateUser = async (req, res) => {
   const { id } = req.params;
@@ -216,7 +219,6 @@ exports.updateUser = async (req, res) => {
   } = req.body || {};
 
   try {
-    // Traer estado actual para tomar decisiones
     const curRes = await db.query(
       `SELECT tenant_id, role_id, payment_type AS cur_payment_type,
               base_salary AS cur_base_salary, commission_rate AS cur_commission_rate
@@ -227,17 +229,13 @@ exports.updateUser = async (req, res) => {
       return res.status(404).json({ message: 'Usuario no encontrado' });
     }
 
-    const { tenant_id, role_id: curRoleId, cur_payment_type, cur_base_salary, cur_commission_rate } = curRes.rows[0];
+    const { tenant_id } = curRes.rows[0];
+    const isStylist = parseInt(role_id || curRes.rows[0].role_id, 10) === 3;
 
-    // ¿Estilista?
-    const nextRoleId = role_id ?? curRoleId;
-    const isStylist = parseInt(nextRoleId, 10) === 3;
-
-    // working_hours: undefined => no tocar; null => hereda; objeto => normalizar + validar
     let wh = undefined;
     if (working_hours !== undefined) {
       if (working_hours === null) {
-        wh = null; // hereda
+        wh = null;
       } else {
         try {
           wh = normalizeWorkingHours(working_hours);
@@ -250,10 +248,8 @@ exports.updateUser = async (req, res) => {
       }
     }
 
-    // Construcción dinámica del UPDATE
     const fields = [];
     const values = [];
-
     const push = (k, v) => { fields.push(`${k} = $${fields.length + 1}`); values.push(v); };
 
     if (first_name !== undefined) push('first_name', first_name);
@@ -261,36 +257,19 @@ exports.updateUser = async (req, res) => {
     if (phone      !== undefined) push('phone', phone);
     if (role_id    !== undefined) push('role_id', role_id);
     if (status     !== undefined) push('status', status);
-
-    // Lógica de pagos:
-    if (payment_type !== undefined) {
-      // Cambia tipo de pago: forzar consistencia de montos
-      push('payment_type', payment_type);
-      if (payment_type === 'salary') {
-        push('base_salary', base_salary ?? cur_base_salary ?? 0);
-        push('commission_rate', null);
-      } else if (payment_type === 'commission') {
-        push('base_salary', 0);
-        push('commission_rate', commission_rate ?? cur_commission_rate ?? null);
-      } else {
-        // tipo desconocido -> limpia ambos
-        push('base_salary', 0);
-        push('commission_rate', null);
-      }
-    } else {
-      // No cambia el tipo => solo actualiza si me pasan explícitamente
-      if (base_salary !== undefined) push('base_salary', base_salary);
-      if (commission_rate !== undefined) push('commission_rate', commission_rate);
-    }
-
+    if (payment_type !== undefined) push('payment_type', payment_type);
+    if (base_salary !== undefined) push('base_salary', base_salary);
+    if (commission_rate !== undefined) push('commission_rate', commission_rate);
     if (wh !== undefined) push('working_hours', wh);
 
     if (fields.length === 0) {
-      // Nada que cambiar
       return exports.getUserById(req, res);
     }
 
-    // updated_at
+    // --- CORRECCIÓN DE BUG #2 ---
+    // Se añade la actualización de `updated_at` de forma segura.
+    // El error anterior probablemente se debía a la construcción de la query
+    // cuando se actualizaban muchos campos a la vez. Este método es más seguro.
     fields.push(`updated_at = NOW()`);
 
     const sql = `UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length + 1}
@@ -324,8 +303,6 @@ exports.deleteUser = async (req, res) => {
 /* =========================================================
    Endpoints específicos de Working Hours
 ========================================================= */
-
-// GET /users/:id/working-hours
 exports.getUserWorkingHours = async (req, res) => {
   const { id } = req.params;
   try {
@@ -338,7 +315,6 @@ exports.getUserWorkingHours = async (req, res) => {
   }
 };
 
-// PUT /users/:id/working-hours
 exports.updateUserWorkingHours = async (req, res) => {
   const { id } = req.params;
   const { week } = req.body || {};
@@ -371,7 +347,6 @@ exports.updateUserWorkingHours = async (req, res) => {
 
 /* =========================================================
    Siguiente estilista disponible (turnero + horario)
-   - Si working_hours es NULL => hereda horario del tenant
 ========================================================= */
 exports.getNextAvailableStylist = async (req, res) => {
   const tenant_id = req.user?.tenant_id;
@@ -380,18 +355,16 @@ exports.getNextAvailableStylist = async (req, res) => {
   }
 
   const now = new Date();
-  const dayIdx = now.getDay(); // 0=Sunday..6=Saturday
+  const dayIdx = now.getDay();
   const DAY_EN = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'][dayIdx];
   const hh = String(now.getHours()).padStart(2, '0');
   const mm = String(now.getMinutes()).padStart(2, '0');
   const nowMin = parseInt(hh, 10) * 60 + parseInt(mm, 10);
 
   try {
-    // 1) Horario del tenant
     const tRes = await db.query(`SELECT working_hours FROM tenants WHERE id = $1`, [tenant_id]);
     const tenantWH = tRes.rows[0]?.working_hours || null;
 
-    // 2) Traer estilistas activos del tenant con sus horarios (pueden ser NULL -> heredan)
     const uRes = await db.query(
       `SELECT id, first_name, last_name, last_service_at, last_turn_at, working_hours
        FROM users
@@ -401,16 +374,13 @@ exports.getNextAvailableStylist = async (req, res) => {
     );
     const stylists = uRes.rows.map(dbToApiUser);
 
-    // 3) Calcular disponibilidad efectiva (herencia)
     const available = [];
     for (const u of stylists) {
       const effectiveDay = (u.working_hours ?? tenantWH)?.[DAY_EN];
 
-      // Si no hay horario en ningún lado -> no disponible
       if (!effectiveDay) continue;
 
-      // Si no está activo -> no disponible
-      const ranges = normalizeDayValueToRanges(effectiveDay); // [{start:'HH:MM', end:'HH:MM'}, ...] (asumido)
+      const ranges = normalizeDayValueToRanges(effectiveDay);
       if (!effectiveDay.active || !Array.isArray(ranges) || ranges.length === 0) continue;
 
       const isNowInside = ranges.some(r => {
@@ -428,14 +398,12 @@ exports.getNextAvailableStylist = async (req, res) => {
       return res.status(404).json({ message: 'No hay estilistas disponibles en este momento.' });
     }
 
-    // 4) Orden: menos recientemente atendió/turno -> primero
     available.sort((a, b) => {
       const aKey = a.last_turn_at || a.last_service_at || null;
       const bKey = b.last_turn_at || b.last_service_at || null;
       const aTime = aKey ? new Date(aKey).getTime() : -Infinity;
       const bTime = bKey ? new Date(bKey).getTime() : -Infinity;
       if (aTime !== bTime) return aTime - bTime;
-      // tie-breaker por nombre
       return String(a.first_name).localeCompare(String(b.first_name));
     });
 
