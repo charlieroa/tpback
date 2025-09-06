@@ -3,45 +3,73 @@
 // =============================================
 const db = require('../config/db');
 
-// ... (openCashSession, getCurrentSession, etc. se mantienen igual) ...
+// ... (Las funciones de MOVIMIENTOS al final no cambian) ...
+
+// =============================================
+// ===          FUNCIONES DE SESIONES          ===
+// =============================================
+
 exports.openCashSession = async (req, res) => {
-    const { initial_amount } = req.body;
-    const { tenant_id, id: user_id } = req.user;
-    const numericAmount = Number(initial_amount);
-    if (initial_amount == null || !Number.isFinite(numericAmount) || numericAmount < 0) {
-      return res.status(400).json({ error: 'El monto inicial (initial_amount) es obligatorio y debe ser un número positivo.' });
+  const { initial_amount } = req.body;
+  const { tenant_id, id: user_id } = req.user;
+
+  const numericAmount = Number(initial_amount);
+  if (initial_amount == null || !Number.isFinite(numericAmount) || numericAmount < 0) {
+    return res.status(400).json({ error: 'El monto inicial es obligatorio y debe ser un número positivo.' });
+  }
+
+  try {
+    // --- LÓGICA MODIFICADA ---
+    // Ahora verificamos si ESTE USUARIO ya tiene una caja abierta, en lugar de verificar para todo el tenant.
+    const existingOpenSession = await db.query(
+      "SELECT id FROM cash_sessions WHERE opened_by_user_id = $1 AND status = 'OPEN'",
+      [user_id]
+    );
+
+    if (existingOpenSession.rowCount > 0) {
+      return res.status(409).json({ error: 'Ya tienes una sesión de caja abierta. Debes cerrarla antes de abrir una nueva.' });
     }
-    try {
-      const existingOpenSession = await db.query( "SELECT id FROM cash_sessions WHERE tenant_id = $1 AND status = 'OPEN'", [tenant_id] );
-      if (existingOpenSession.rowCount > 0) {
-        return res.status(409).json({ error: 'Ya existe una sesión de caja abierta. Ciérrela antes de abrir una nueva.' });
-      }
-      const query = `
-        INSERT INTO cash_sessions (tenant_id, opened_by_user_id, initial_amount, status, opened_at)
-        VALUES ($1, $2, $3, 'OPEN', NOW())
-        RETURNING *;
-      `;
-      const result = await db.query(query, [tenant_id, user_id, numericAmount]);
-      res.status(201).json(result.rows[0]);
-    } catch (error) {
-      console.error('Error al abrir la sesión de caja:', error);
-      res.status(500).json({ error: 'Error interno del servidor.' });
-    }
+
+    // El resto de la lógica de inserción es igual.
+    const query = `
+      INSERT INTO cash_sessions (tenant_id, opened_by_user_id, initial_amount, status, opened_at)
+      VALUES ($1, $2, $3, 'OPEN', NOW())
+      RETURNING *;
+    `;
+    const result = await db.query(query, [tenant_id, user_id, numericAmount]);
+    res.status(201).json(result.rows[0]);
+
+  } catch (error) {
+    console.error('Error al abrir la sesión de caja:', error);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  }
 };
+
 exports.getCurrentSession = async (req, res) => {
-    const { tenant_id } = req.user;
+    // --- LÓGICA MODIFICADA ---
+    // Ahora la sesión "actual" es la del usuario que está haciendo la petición.
+    const { tenant_id, id: user_id } = req.user;
+  
     try {
-      const sessionResult = await db.query( "SELECT s.*, u.first_name as opener_name FROM cash_sessions s JOIN users u ON s.opened_by_user_id = u.id WHERE s.tenant_id = $1 AND s.status = 'OPEN'", [tenant_id] );
+      const sessionResult = await db.query(
+        "SELECT s.*, u.first_name as opener_name FROM cash_sessions s JOIN users u ON s.opened_by_user_id = u.id WHERE s.opened_by_user_id = $1 AND s.status = 'OPEN'",
+        [user_id]
+      );
+  
       if (sessionResult.rowCount === 0) {
         return res.status(200).json(null);
       }
+  
       const session = sessionResult.rows[0];
+  
+      // El resto de la lógica para calcular el resumen es la misma.
       const incomesSummaryResult = await db.query( `SELECT payment_method, COUNT(*)::int as count, COALESCE(SUM(amount), 0) as total FROM payments WHERE cash_session_id = $1 GROUP BY payment_method`, [session.id] );
       const expensesSummaryResult = await db.query( `SELECT category, COUNT(*)::int as count, COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE cash_session_id = $1 AND type IN ('expense', 'payroll_advance') GROUP BY category`, [session.id] );
       const attendedAppointmentsResult = await db.query( `SELECT COUNT(DISTINCT appointment_id)::int FROM payments WHERE cash_session_id = $1 AND appointment_id IS NOT NULL`, [session.id] );
       const netCashMovementsResult = await db.query( `SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE cash_session_id = $1 AND payment_method = 'cash'`, [session.id] );
       const netCashFromMovements = Number(netCashMovementsResult.rows[0].total);
       const expected_cash_amount = Number(session.initial_amount) + netCashFromMovements;
+  
       res.status(200).json({
         session_details: session,
         expected_cash_amount,
@@ -51,19 +79,17 @@ exports.getCurrentSession = async (req, res) => {
             attended_appointments_count: attendedAppointmentsResult.rows[0].count || 0
         }
       });
+  
     } catch (error) {
       console.error('Error al obtener la sesión de caja actual:', error);
       res.status(500).json({ error: 'Error interno del servidor.' });
     }
 };
 
-/**
- * @desc    Cierra la sesión de caja activa. El conteo final es OPCIONAL.
- * @route   POST /api/cash/close
- */
 exports.closeCashSession = async (req, res) => {
-    // --- MODIFICADO: Hacemos el `final_amount_counted` opcional ---
-    const { final_amount_counted = null } = req.body; // Si no viene, es null
+    const { final_amount_counted = null } = req.body;
+    // --- LÓGICA MODIFICADA ---
+    // El usuario que cierra la caja es el que está en el token.
     const { tenant_id, id: user_id } = req.user;
 
     let numericFinalAmount = null;
@@ -77,25 +103,23 @@ exports.closeCashSession = async (req, res) => {
     }
 
     try {
+        // --- LÓGICA MODIFICADA ---
+        // Buscamos la sesión abierta que pertenece a ESTE usuario.
         const sessionResult = await db.query(
-            "SELECT * FROM cash_sessions WHERE tenant_id = $1 AND status = 'OPEN'",
-            [tenant_id]
+            "SELECT * FROM cash_sessions WHERE opened_by_user_id = $1 AND status = 'OPEN'",
+            [user_id]
         );
     
         if (sessionResult.rowCount === 0) {
-            return res.status(404).json({ error: 'No se encontró una sesión de caja abierta para cerrar.' });
+            return res.status(404).json({ error: 'No tienes una sesión de caja abierta para cerrar.' });
         }
     
         const session = sessionResult.rows[0];
     
-        const netCashMovementsResult = await db.query(
-          `SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE cash_session_id = $1 AND payment_method = 'cash'`,
-          [session.id]
-        );
+        // El resto de la lógica de cálculo es la misma.
+        const netCashMovementsResult = await db.query( `SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE cash_session_id = $1 AND payment_method = 'cash'`, [session.id] );
         const netCashFromMovements = Number(netCashMovementsResult.rows[0].total);
         const expected_cash_amount = Number(session.initial_amount) + netCashFromMovements;
-        
-        // --- MODIFICADO: Calculamos la diferencia solo si se proveyó un monto ---
         if (numericFinalAmount !== null) {
             difference = numericFinalAmount - expected_cash_amount;
         }
@@ -120,7 +144,7 @@ exports.closeCashSession = async (req, res) => {
     }
 };
 
-// ... (getSessionHistory y las funciones de MOVIMIENTOS se mantienen igual) ...
+// ... (El resto del archivo, getSessionHistory y las funciones de MOVIMIENTOS, no necesitan cambios) ...
 exports.getSessionHistory = async (req, res) => {
     const { tenant_id } = req.user;
     try {
