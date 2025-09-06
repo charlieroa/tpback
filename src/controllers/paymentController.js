@@ -1,8 +1,10 @@
-// src/controllers/paymentController.js
+// =============================================
+// File: src/controllers/paymentController.js
+// =============================================
 const db = require('../config/db');
 
 /**
- * Crea un pago y marca la cita como 'completed'
+ * Crea un pago, lo asocia a una sesión de caja, y marca la cita como 'completed'.
  */
 exports.createPayment = async (req, res) => {
   const { appointment_id, amount, payment_method } = req.body;
@@ -19,7 +21,17 @@ exports.createPayment = async (req, res) => {
   try {
     await db.query('BEGIN');
 
-    // A) Obtener y bloquear la cita
+    // --- NUEVO: OBTENER LA SESIÓN DE CAJA ACTIVA ---
+    // Buscamos si hay una sesión de caja abierta para este tenant.
+    const openSession = await db.query(
+      "SELECT id FROM cash_sessions WHERE tenant_id = $1 AND status = 'OPEN'",
+      [tenant_id]
+    );
+    // Si encontramos una sesión, guardamos su ID. Si no, será null.
+    const cash_session_id = openSession.rowCount > 0 ? openSession.rows[0].id : null;
+
+
+    // A) Obtener y bloquear la cita (sin cambios)
     const apptRes = await db.query(
       'SELECT status, tenant_id FROM appointments WHERE id = $1 FOR UPDATE',
       [appointment_id]
@@ -35,14 +47,14 @@ exports.createPayment = async (req, res) => {
       throw new Error('El servicio debe estar en estado Checkout para poder ser pagado.');
     }
 
-    // B) Insertar el registro del pago
+    // B) Insertar el registro del pago (MODIFICADO para incluir cash_session_id)
     const payRes = await db.query(
-      `INSERT INTO payments (tenant_id, appointment_id, amount, payment_method, cashier_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [tenant_id, appointment_id, Number(amount), payment_method || 'cash', cashier_id]
+      `INSERT INTO payments (tenant_id, appointment_id, amount, payment_method, cashier_id, cash_session_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`, // <-- MODIFICADO
+      [tenant_id, appointment_id, Number(amount), payment_method || 'cash', cashier_id, cash_session_id] // <-- MODIFICADO
     );
 
-    // C) Actualizar la cita a 'completed'
+    // C) Actualizar la cita a 'completed' (sin cambios)
     await db.query(
       `UPDATE appointments 
        SET status = 'completed', updated_at = NOW() 
@@ -50,19 +62,20 @@ exports.createPayment = async (req, res) => {
       [appointment_id]
     );
 
-    // D) Registrar movimiento de caja si es efectivo
+    // D) Registrar movimiento de caja si es efectivo (MODIFICADO para incluir cash_session_id)
     const pm = (payment_method || 'cash').toLowerCase();
     if (pm === 'cash') {
       await db.query(
         `INSERT INTO cash_movements
-          (tenant_id, user_id, type, description, amount, category, payment_method, related_entity_type, related_entity_id)
-         VALUES ($1,$2,'income',$3,$4,'service_payment','cash','appointment',$5)`,
+          (tenant_id, user_id, type, description, amount, category, payment_method, related_entity_type, related_entity_id, cash_session_id)
+         VALUES ($1, $2, 'income', $3, $4, 'service_payment', 'cash', 'appointment', $5, $6)`, // <-- MODIFICADO
         [
           tenant_id,
           cashier_id,
           `Pago cita #${appointment_id}`,
-          Math.abs(Number(amount)),   // ingreso positivo
-          appointment_id
+          Math.abs(Number(amount)),
+          appointment_id,
+          cash_session_id // <-- MODIFICADO
         ]
       );
     }
@@ -78,7 +91,7 @@ exports.createPayment = async (req, res) => {
 };
 
 /**
- * Obtiene todos los pagos de un tenant.
+ * Obtiene todos los pagos de un tenant. (Sin cambios)
  */
 exports.getPaymentsByTenant = async (req, res) => {
   const { tenantId } = req.params;

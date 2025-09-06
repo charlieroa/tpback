@@ -9,7 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 
-const db = require('./config/db'); // si tu conexión inicializa aquí, se mantiene
+const db = require('./config/db');
 
 // Rutas
 const tenantRoutes = require('./routes/tenantRoutes');
@@ -34,15 +34,14 @@ const PORT = process.env.PORT || 3000;
    🛡️ CORS (local + producción)
 ======================================= */
 const allowedOrigins = [
-  'http://localhost:3001',        // desarrollo local (front)
+  'http://localhost:3001',       // desarrollo local (front)
   'https://tpia.tupelukeria.com', // producción
 ];
 
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Permitir requests sin origin (Postman, curl)
-      if (!origin) return callback(null, true);
+      if (!origin) return callback(null, true); // Permitir Postman, etc.
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error('No permitido por CORS: ' + origin));
     },
@@ -57,25 +56,19 @@ app.use(express.json());
 
 /* =======================================
    🗂️ Archivos estáticos (logos, etc.)
-   Estructura esperada en la raíz del proyecto:
-   public/uploads/logos
 ======================================= */
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const UPLOADS_DIR = path.join(PUBLIC_DIR, 'uploads');
 const LOGOS_DIR = path.join(UPLOADS_DIR, 'logos');
 
-// Crear carpetas si no existen
 fs.mkdirSync(LOGOS_DIR, { recursive: true });
 
-// Servir /public en la raíz (p.ej. /uploads/logos/xxx.png)
 app.use(express.static(PUBLIC_DIR));
-// Alias explícitos para evitar errores cuando el front usa /api/uploads/...
 app.use('/uploads', express.static(UPLOADS_DIR));
 app.use('/api/uploads', express.static(UPLOADS_DIR));
 
 /* =======================================
    ⬆️ Subida de archivos (Multer) para logos
-   Campo esperado en el form-data: "logo"
 ======================================= */
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, LOGOS_DIR),
@@ -106,7 +99,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/payrolls', payrollRoutes);
 app.use('/api/stylists', stylistRoutes);
 app.use('/api/categories', categoryRoutes);
-app.use('/api/cash-movements', cashRoutes);
+app.use('/api/cash', cashRoutes); // <-- ESTA LÍNEA ESTÁ CORRECTA
 
 // Subida de logo del tenant (usa tu controller existente)
 app.post('/api/tenants/:tenantId/logo', upload.single('logo'), uploadTenantLogo);
