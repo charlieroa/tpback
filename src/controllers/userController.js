@@ -147,7 +147,7 @@ exports.createUser = async (req, res) => {
 };
 
 /* =========================================================
-   Obtener todos los Usuarios por tenant (con filtro rol) - CORREGIDO
+   Obtener todos los Usuarios por tenant (con filtro rol) - ESTA NO SE TOCA
 ========================================================= */
 exports.getAllUsersByTenant = async (req, res) => {
   const { tenantId } = req.params;
@@ -169,9 +169,7 @@ exports.getAllUsersByTenant = async (req, res) => {
     sql += ' AND role_id = $2';
     params.push(parseInt(role_id, 10));
   }
-
-  // --- CORRECCIÓN DE BUG #1 ---
-  // Se añadió un espacio antes de "ORDER BY"
+  
   sql += ' ORDER BY first_name';
 
   try {
@@ -208,7 +206,7 @@ exports.getUserById = async (req, res) => {
 };
 
 /* =========================================================
-   Actualizar un Usuario - CORREGIDO
+   Actualizar un Usuario
 ========================================================= */
 exports.updateUser = async (req, res) => {
   const { id } = req.params;
@@ -265,11 +263,7 @@ exports.updateUser = async (req, res) => {
     if (fields.length === 0) {
       return exports.getUserById(req, res);
     }
-
-    // --- CORRECCIÓN DE BUG #2 ---
-    // Se añade la actualización de `updated_at` de forma segura.
-    // El error anterior probablemente se debía a la construcción de la query
-    // cuando se actualizaban muchos campos a la vez. Este método es más seguro.
+    
     fields.push(`updated_at = NOW()`);
 
     const sql = `UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length + 1}
@@ -447,6 +441,68 @@ exports.getUserByPhone = async (req, res) => {
     return res.status(200).json(dbToApiUser(r.rows[0]));
   } catch (error) {
     console.error('Error al buscar usuario por teléfono:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+/* ==================================================================
+   NUEVA FUNCIÓN PARA EL CRM - VERSIÓN CORREGIDA
+================================================================== */
+exports.getTenantClientsWithRecentServices = async (req, res) => {
+  const { tenantId } = req.params;
+  const role_id_cliente = 4; // El rol de cliente es 4
+
+  if (!tenantId) {
+    return res.status(400).json({ error: 'El ID del tenant es obligatorio.' });
+  }
+
+  // Se ha reemplazado a.user_id por a.client_id en todas las instancias.
+  const sql = `
+    WITH UserAppointments AS (
+      SELECT
+        a.client_id, -- CORREGIDO
+        s.name AS service_name,
+        a.start_time,
+        ROW_NUMBER() OVER(PARTITION BY a.client_id ORDER BY a.start_time DESC) as rn -- CORREGIDO
+      FROM appointments a
+      JOIN services s ON a.service_id = s.id
+      WHERE a.tenant_id = $1
+    )
+    SELECT
+      u.id,
+      u.first_name,
+      u.last_name,
+      u.email,
+      u.phone,
+      COALESCE(
+        (
+          SELECT json_agg(ua.service_name ORDER BY ua.start_time DESC)
+          FROM UserAppointments ua
+          WHERE ua.client_id = u.id AND ua.rn <= 5 -- CORREGIDO
+        ),
+        '[]'::json
+      ) AS last_services,
+      (SELECT COUNT(*) FROM appointments WHERE client_id = u.id) as services_count -- CORREGIDO
+    FROM users u
+    WHERE u.tenant_id = $1 AND u.role_id = $2
+    ORDER BY u.first_name, u.last_name;
+  `;
+
+  try {
+    const result = await db.query(sql, [tenantId, role_id_cliente]);
+    
+    const clients = result.rows.map(row => ({
+      id: row.id,
+      name: `${row.first_name} ${row.last_name || ''}`.trim(),
+      email: row.email,
+      phone: row.phone,
+      img: null,
+      tags: row.last_services,
+      cantidadServicios: parseInt(row.services_count, 10) || 0
+    }));
+
+    return res.status(200).json(clients);
+  } catch (error) {
+    console.error('Error al obtener clientes con servicios recientes:', error);
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };

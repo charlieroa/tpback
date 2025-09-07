@@ -10,6 +10,10 @@ const authMiddleware = require('../middleware/authMiddleware');
 // Rutas ESPECÍFICAS (van primero para evitar colisiones)
 // =========================================================
 
+// ----> RUTA NUEVA AÑADIDA AQUÍ <----
+// GET /api/users/tenant/:tenantId/clients - Para la lista del CRM
+router.get('/tenant/:tenantId/clients', authMiddleware, userController.getTenantClientsWithRecentServices);
+
 // GET /api/users/by-phone/:phoneNumber - Para que el bot identifique clientes
 router.get('/by-phone/:phoneNumber', authMiddleware, userController.getUserByPhone);
 
