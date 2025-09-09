@@ -1,24 +1,21 @@
 const db = require('../config/db');
 const slugify = require('slugify');
 
-// Helper: crea slug consistente
-const createSlug = (text = '') =>
-  slugify(text, { lower: true, strict: true, remove: /[*+~.()'"!:@]/g });
+// --- Helpers ---
 
-// Helper: normaliza nulls/strings vacíos
+const createSlug = (text = '') => slugify(text, { lower: true, strict: true, remove: /[*+~.()'"!:@]/g });
 const clean = (v) => (v === undefined || v === null ? null : v);
-
-// Helper: convierte fracción (0.19) -> porcentaje (19) para API
 const fracToPct = (v) => (v === null || v === undefined ? null : Number(v) * 100);
-
-// Helper: convierte porcentaje (19) -> fracción (0.19) para BD
 const pctToFrac = (v) => {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n / 100 : null;
 };
+const safeParseJSON = (s) => {
+  try { return JSON.parse(s); } catch { return null; }
+};
 
-// Mapea fila de BD -> objeto API esperado por el frontend
+// Mapea la fila de la BD al objeto que espera la API del frontend
 const dbToApiTenant = (row) => ({
   id: row.id,
   name: row.name,
@@ -27,33 +24,28 @@ const dbToApiTenant = (row) => ({
   email: row.email,
   website: row.website,
   logo_url: row.logo_url,
-  // el front espera estos nombres y en PORCENTAJE
   iva_rate: fracToPct(row.tax_rate),
   admin_fee_percent: fracToPct(row.admin_fee_rate),
   slug: row.slug,
-  // working_hours puede venir como objeto o string JSON
-  working_hours: typeof row.working_hours === 'string'
-    ? safeParseJSON(row.working_hours)
-    : row.working_hours,
+  working_hours: typeof row.working_hours === 'string' ? safeParseJSON(row.working_hours) : row.working_hours,
+  // --- Mapeo de los nuevos módulos activables ---
+  products_for_staff_enabled: row.products_for_staff_enabled,
+  admin_fee_enabled: row.admin_fee_enabled,
+  loans_to_staff_enabled: row.loans_to_staff_enabled,
+  // ---------------------------------------------
   created_at: row.created_at,
   updated_at: row.updated_at,
 });
 
-const safeParseJSON = (s) => {
-  try { return JSON.parse(s); } catch { return null; }
-};
-
-// Construye SET dinámico para UPDATE en función de campos presentes
+// Construye la cláusula SET dinámicamente para las actualizaciones
 const buildUpdateSet = (payload) => {
   const fields = [];
   const values = [];
   let i = 1;
-
   for (const [k, v] of Object.entries(payload)) {
     fields.push(`${k} = $${i++}`);
     values.push(v);
   }
-  // updated_at
   fields.push(`updated_at = NOW()`);
   return { clause: fields.join(', '), values };
 };
@@ -64,40 +56,27 @@ const buildUpdateSet = (payload) => {
 exports.createTenant = async (req, res) => {
   try {
     const {
-      name,
-      address,
-      phone,
-      working_hours,
-      email,
-      website,
-      logo_url,
-      // desde el front en porcentaje
-      iva_rate,
-      admin_fee_percent,
+      name, address, phone, working_hours, email, website, logo_url, 
+      iva_rate, admin_fee_percent, products_for_staff_enabled = true, 
+      admin_fee_enabled = false, loans_to_staff_enabled = false
     } = req.body;
 
-    if (!name) return res.status(400).json({ error: 'name es requerido' });
+    if (!name) return res.status(400).json({ error: 'El nombre es requerido' });
 
     const slug = createSlug(name);
-
     const result = await db.query(
-      `INSERT INTO tenants
-         (name, address, phone, working_hours, slug, email, website, logo_url, tax_rate, admin_fee_rate)
-        VALUES
-         ($1,   $2,      $3,    $4,              $5,   $6,      $7,      $8,        $9,            $10)
-        RETURNING *`,
+      `INSERT INTO tenants (
+          name, address, phone, working_hours, slug, email, website, logo_url, 
+          tax_rate, admin_fee_rate, products_for_staff_enabled, admin_fee_enabled, loans_to_staff_enabled
+       ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+       ) RETURNING *`,
       [
-        clean(name),
-        clean(address),
-        clean(phone),
-        // guarda JSON si viene objeto
+        clean(name), clean(address), clean(phone), 
         working_hours ? JSON.stringify(working_hours) : null,
-        slug,
-        clean(email),
-        clean(website),
-        clean(logo_url),
-        pctToFrac(iva_rate),
-        pctToFrac(admin_fee_percent),
+        slug, clean(email), clean(website), clean(logo_url),
+        pctToFrac(iva_rate), pctToFrac(admin_fee_percent),
+        products_for_staff_enabled, admin_fee_enabled, loans_to_staff_enabled
       ]
     );
 
@@ -105,141 +84,123 @@ exports.createTenant = async (req, res) => {
   } catch (error) {
     console.error('Error al crear tenant:', error);
     if (error.code === '23505') {
-      // índice único (por ejemplo slug unique)
       return res.status(409).json({ error: 'Ya existe una peluquería con un nombre similar.' });
     }
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
 
-// Listar todos o por slug
+// Listar todos los Tenants
 exports.getAllTenants = async (req, res) => {
-  const { slug } = req.query;
-
-  try {
-    if (slug) {
-      const r = await db.query('SELECT * FROM tenants WHERE slug = $1', [slug]);
-      if (r.rows.length === 0) return res.status(404).json({ message: 'Peluquería no encontrada con ese slug.' });
-      return res.status(200).json(dbToApiTenant(r.rows[0]));
+    const { slug } = req.query;
+    try {
+        if (slug) {
+            const r = await db.query('SELECT * FROM tenants WHERE slug = $1', [slug]);
+            if (r.rows.length === 0) return res.status(404).json({ message: 'Peluquería no encontrada con ese slug.' });
+            return res.status(200).json(dbToApiTenant(r.rows[0]));
+        }
+        const result = await db.query('SELECT * FROM tenants ORDER BY created_at DESC');
+        return res.status(200).json(result.rows.map(dbToApiTenant));
+    } catch (error) {
+        console.error('Error al obtener tenants:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
     }
-
-    const result = await db.query('SELECT * FROM tenants ORDER BY created_at DESC');
-    return res.status(200).json(result.rows.map(dbToApiTenant));
-  } catch (error) {
-    console.error('Error al obtener tenants:', error);
-    return res.status(500).json({ error: 'Error interno del servidor' });
-  }
 };
 
-// Obtener por ID
+// Obtener un Tenant por ID
 exports.getTenantById = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const result = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
-    if (result.rows.length === 0) return res.status(404).json({ message: 'Tenant no encontrado' });
-    return res.status(200).json(dbToApiTenant(result.rows[0]));
-  } catch (error) {
-    console.error('Error al obtener tenant por ID:', error);
-    return res.status(500).json({ error: 'Error interno del servidor' });
-  }
+    const { id } = req.params;
+    try {
+        const result = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
+        if (result.rows.length === 0) return res.status(404).json({ message: 'Tenant no encontrado' });
+        return res.status(200).json(dbToApiTenant(result.rows[0]));
+    } catch (error) {
+        console.error('Error al obtener tenant por ID:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
 };
 
 // Actualizar (parcial) un Tenant
 exports.updateTenant = async (req, res) => {
-  const { id } = req.params;
-
-  try {
-    // Traemos el actual para defaults/slug
-    const prev = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
-    if (prev.rows.length === 0) return res.status(404).json({ message: 'Tenant no encontrado para actualizar' });
-
-    const {
-      name = prev.rows[0].name,
-      address = prev.rows[0].address,
-      phone = prev.rows[0].phone,
-      working_hours = prev.rows[0].working_hours,
-      email = prev.rows[0].email,
-      website = prev.rows[0].website,
-      logo_url = prev.rows[0].logo_url,
-      iva_rate,
-      admin_fee_percent,
-    } = req.body;
-
-    const slug = createSlug(name);
-
-    const updatePayload = {
-      name: clean(name),
-      address: clean(address),
-      phone: clean(phone),
-      slug,
-      email: clean(email),
-      website: clean(website),
-      logo_url: clean(logo_url),
-      tax_rate: iva_rate !== undefined ? pctToFrac(iva_rate) : prev.rows[0].tax_rate,
-      admin_fee_rate:
-        admin_fee_percent !== undefined ? pctToFrac(admin_fee_percent) : prev.rows[0].admin_fee_rate,
-      working_hours: working_hours
-        ? (typeof working_hours === 'string' ? working_hours : JSON.stringify(working_hours))
-        : null,
-    };
-
-    const { clause, values } = buildUpdateSet(updatePayload);
-    const sql = `UPDATE tenants SET ${clause} WHERE id = $${values.length + 1} RETURNING *`;
-    const result = await db.query(sql, [...values, id]);
-
-    return res.status(200).json(dbToApiTenant(result.rows[0]));
-  } catch (error) {
-    console.error('Error al actualizar tenant:', error);
-    return res.status(500).json({ error: 'Error interno del servidor' });
-  }
-};
-
-// NUEVO: Endpoint para subir y actualizar el logo del tenant
-exports.uploadTenantLogo = async (req, res) => {
-    // NUEVO: Capturar el ID del tenant de los parámetros de la URL
-    const { tenantId } = req.params;
+    const { id } = req.params;
+    const body = req.body;
 
     try {
-        // Asumiendo que `req.file` es el objeto del archivo subido por Multer
+        const exists = await db.query('SELECT id FROM tenants WHERE id = $1', [id]);
+        if (exists.rowCount === 0) {
+            return res.status(404).json({ message: 'Tenant no encontrado para actualizar' });
+        }
+
+        const payload = {};
+
+        if (body.name !== undefined) {
+            payload.name = clean(body.name);
+            payload.slug = createSlug(body.name);
+        }
+        if (body.address !== undefined) payload.address = clean(body.address);
+        if (body.phone !== undefined) payload.phone = clean(body.phone);
+        if (body.email !== undefined) payload.email = clean(body.email);
+        if (body.website !== undefined) payload.website = clean(body.website);
+        if (body.logo_url !== undefined) payload.logo_url = clean(body.logo_url);
+        if (body.working_hours !== undefined) payload.working_hours = body.working_hours ? JSON.stringify(body.working_hours) : null;
+        if (body.iva_rate !== undefined) payload.tax_rate = pctToFrac(body.iva_rate);
+        
+        if (body.admin_fee_enabled === false) {
+             payload.admin_fee_rate = null;
+        } else if (body.admin_fee_percent !== undefined) {
+             payload.admin_fee_rate = pctToFrac(body.admin_fee_percent);
+        }
+        
+        if (body.products_for_staff_enabled !== undefined) payload.products_for_staff_enabled = body.products_for_staff_enabled;
+        if (body.admin_fee_enabled !== undefined) payload.admin_fee_enabled = body.admin_fee_enabled;
+        if (body.loans_to_staff_enabled !== undefined) payload.loans_to_staff_enabled = body.loans_to_staff_enabled;
+        
+        if (Object.keys(payload).length === 0) {
+            const current = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
+            return res.status(200).json(dbToApiTenant(current.rows[0]));
+        }
+
+        const { clause, values } = buildUpdateSet(payload);
+        const sql = `UPDATE tenants SET ${clause} WHERE id = $${values.length + 1} RETURNING *`;
+        const result = await db.query(sql, [...values, id]);
+
+        return res.status(200).json(dbToApiTenant(result.rows[0]));
+
+    } catch (error) {
+        console.error('Error al actualizar tenant:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+};
+
+// Endpoint para subir y actualizar el logo del tenant
+exports.uploadTenantLogo = async (req, res) => {
+    const { tenantId } = req.params;
+    try {
         if (!req.file) {
             return res.status(400).json({ message: 'No se ha subido ningún archivo.' });
         }
-
-        // Aquí debes construir la URL final del archivo subido.
-        // Por ejemplo, si usas una configuración de Multer que guarda en `/public/uploads/logos`
         const uploadedFileUrl = `/uploads/logos/${req.file.filename}`;
-
-        // Verificar que el tenant exista antes de actualizar
         const tenantExists = await db.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
         if (tenantExists.rowCount === 0) {
             return res.status(404).json({ message: 'Tenant no encontrado.' });
         }
-
-        // Actualizar la base de datos con la nueva URL del logo
-        await db.query(
-            'UPDATE tenants SET logo_url = $1, updated_at = NOW() WHERE id = $2',
-            [uploadedFileUrl, tenantId]
-        );
-
-        // Devolver la URL completa para que el frontend la use
+        await db.query('UPDATE tenants SET logo_url = $1, updated_at = NOW() WHERE id = $2', [uploadedFileUrl, tenantId]);
         return res.status(200).json({ url: uploadedFileUrl });
-
     } catch (error) {
         console.error('Error al subir el logo:', error);
         return res.status(500).json({ error: 'Error interno del servidor.' });
     }
 };
 
-
-// Eliminar
+// Eliminar un Tenant
 exports.deleteTenant = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const result = await db.query('DELETE FROM tenants WHERE id = $1 RETURNING *', [id]);
-    if (result.rowCount === 0) return res.status(404).json({ message: 'Tenant no encontrado para eliminar' });
-    return res.status(204).send();
-  } catch (error) {
-    console.error('Error al eliminar tenant:', error);
-    return res.status(500).json({ error: 'Error interno del servidor' });
-  }
+    const { id } = req.params;
+    try {
+        const result = await db.query('DELETE FROM tenants WHERE id = $1 RETURNING *', [id]);
+        if (result.rowCount === 0) return res.status(404).json({ message: 'Tenant no encontrado para eliminar' });
+        return res.status(204).send();
+    } catch (error) {
+        console.error('Error al eliminar tenant:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
 };
