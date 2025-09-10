@@ -84,14 +84,17 @@ const validateStylistWorkingHoursAgainstTenant = async (tenantId, stylistHours) 
 ========================================================= */
 exports.createUser = async (req, res) => {
   const {
-    tenant_id, role_id, first_name, last_name,
+    tenant_id: tenantIdFromBody, role_id, first_name, last_name,
     email, password, phone,
     payment_type, base_salary, commission_rate,
     working_hours,
   } = req.body;
 
+  // fallback por si lo creas desde sesión autenticada
+  const tenant_id = tenantIdFromBody || req.user?.tenant_id;
+
   const isStylist = parseInt(role_id, 10) === 3;
-  const isClient = parseInt(role_id, 10) === 4;
+  const isClient  = parseInt(role_id, 10) === 4;
 
   if (!tenant_id || !role_id || !first_name || !email || !password) {
     return res.status(400).json({ error: 'Faltan campos obligatorios.' });
@@ -102,7 +105,7 @@ exports.createUser = async (req, res) => {
 
   try {
     const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(password, salt);
+    const passwordHashed = await bcrypt.hash(password, salt);
 
     let wh = null;
     if (working_hours !== undefined && working_hours !== null) {
@@ -118,7 +121,7 @@ exports.createUser = async (req, res) => {
 
     const result = await db.query(
       `INSERT INTO users (
-         tenant_id, role_id, first_name, last_name, email, password_hash, phone,
+         tenant_id, role_id, first_name, last_name, email, password, phone,
          payment_type, base_salary, commission_rate, working_hours
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *`,
@@ -128,7 +131,7 @@ exports.createUser = async (req, res) => {
         first_name,
         last_name || null,
         email,
-        password_hash,
+        passwordHashed,            // <- columna 'password' en tu esquema
         phone || null,
         payment_type || null,
         payment_type === 'salary' ? (base_salary ?? 0) : 0,
@@ -137,25 +140,22 @@ exports.createUser = async (req, res) => {
       ]
     );
     
-    // --- INICIO DE LA CORRECCIÓN ---
-    // Si el usuario creado es un cliente, devolvemos el formato que espera el CRM.
-    // Si no, devolvemos el formato de usuario estándar.
+    // Si es cliente, devolvemos el formato que espera el CRM
     if (isClient) {
-        const newUserFromDb = dbToApiUser(result.rows[0]);
-        const clientResponse = {
-            id: newUserFromDb.id,
-            name: `${newUserFromDb.first_name} ${newUserFromDb.last_name || ''}`.trim(),
-            email: newUserFromDb.email,
-            phone: newUserFromDb.phone,
-            img: null,
-            tags: [],
-            cantidadServicios: 0
-        };
-        return res.status(201).json(clientResponse);
+      const newUserFromDb = dbToApiUser(result.rows[0]);
+      const clientResponse = {
+        id: newUserFromDb.id,
+        name: `${newUserFromDb.first_name} ${newUserFromDb.last_name || ''}`.trim(),
+        email: newUserFromDb.email,
+        phone: newUserFromDb.phone,
+        img: null,
+        tags: [],
+        cantidadServicios: 0
+      };
+      return res.status(201).json(clientResponse);
     } else {
-        return res.status(201).json(dbToApiUser(result.rows[0]));
+      return res.status(201).json(dbToApiUser(result.rows[0]));
     }
-    // --- FIN DE LA CORRECCIÓN ---
 
   } catch (error) {
     console.error('Error al crear usuario:', error);
@@ -167,7 +167,7 @@ exports.createUser = async (req, res) => {
 };
 
 /* =========================================================
-   Obtener todos los Usuarios por tenant (con filtro rol) - ESTA NO SE TOCA
+   Obtener todos los Usuarios por tenant (con filtro rol)
 ========================================================= */
 exports.getAllUsersByTenant = async (req, res) => {
   const { tenantId } = req.params;
@@ -237,11 +237,11 @@ exports.updateUser = async (req, res) => {
   try {
     const userRes = await db.query(`SELECT tenant_id, role_id FROM users WHERE id = $1`, [id]);
     if (userRes.rows.length === 0) {
-        return res.status(404).json({ message: 'Usuario no encontrado' });
+      return res.status(404).json({ message: 'Usuario no encontrado' });
     }
     const { tenant_id, role_id } = userRes.rows[0];
     const isStylist = parseInt(role_id, 10) === 3;
-    const isClient = parseInt(role_id, 10) === 4;
+    const isClient  = parseInt(role_id, 10) === 4;
 
     // Manejo especial para la contraseña
     if (updates.password) {
@@ -249,9 +249,9 @@ exports.updateUser = async (req, res) => {
         return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres." });
       }
       const salt = await bcrypt.genSalt(10);
-      const password_hash = await bcrypt.hash(updates.password, salt);
-      updateFields.push(`password_hash = $${paramIndex++}`);
-      values.push(password_hash);
+      const passwordHashed = await bcrypt.hash(updates.password, salt);
+      updateFields.push(`password = $${paramIndex++}`); // <- columna 'password'
+      values.push(passwordHashed);
     }
 
     // Manejo especial para working_hours
@@ -274,18 +274,18 @@ exports.updateUser = async (req, res) => {
 
     if (updateFields.length === 0) {
       // Si no hay nada que actualizar, devolvemos el usuario actual en el formato correcto
-       const currentUser = await db.query('SELECT * FROM users WHERE id = $1', [id]);
-       if (isClient) {
-           const dbUser = dbToApiUser(currentUser.rows[0]);
-           return res.status(200).json({
-               id: dbUser.id,
-               name: `${dbUser.first_name} ${dbUser.last_name || ''}`.trim(),
-               email: dbUser.email,
-               phone: dbUser.phone
-           });
-       } else {
-           return res.status(200).json(dbToApiUser(currentUser.rows[0]));
-       }
+      const currentUser = await db.query('SELECT * FROM users WHERE id = $1', [id]);
+      if (isClient) {
+        const dbUser = dbToApiUser(currentUser.rows[0]);
+        return res.status(200).json({
+          id: dbUser.id,
+          name: `${dbUser.first_name} ${dbUser.last_name || ''}`.trim(),
+          email: dbUser.email,
+          phone: dbUser.phone
+        });
+      } else {
+        return res.status(200).json(dbToApiUser(currentUser.rows[0]));
+      }
     }
 
     values.push(id); // El último parámetro es el ID para el WHERE
@@ -304,16 +304,16 @@ exports.updateUser = async (req, res) => {
     }
     
     // Devolvemos en el formato correcto según el rol
-    if(isClient) {
-        const updatedDbUser = dbToApiUser(result.rows[0]);
-        res.status(200).json({
-            id: updatedDbUser.id,
-            name: `${updatedDbUser.first_name} ${updatedDbUser.last_name || ''}`.trim(),
-            email: updatedDbUser.email,
-            phone: updatedDbUser.phone
-        });
+    if (isClient) {
+      const updatedDbUser = dbToApiUser(result.rows[0]);
+      res.status(200).json({
+        id: updatedDbUser.id,
+        name: `${updatedDbUser.first_name} ${updatedDbUser.last_name || ''}`.trim(),
+        email: updatedDbUser.email,
+        phone: updatedDbUser.phone
+      });
     } else {
-        res.status(200).json(dbToApiUser(result.rows[0]));
+      res.status(200).json(dbToApiUser(result.rows[0]));
     }
 
   } catch (error) {

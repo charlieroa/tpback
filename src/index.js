@@ -25,7 +25,7 @@ const authRoutes = require('./routes/authRoutes');
 const cashRoutes = require('./routes/cashRoutes');
 const productCategoryRoutes = require('./routes/productCategoryRoutes');
 const staffPurchaseRoutes = require('./routes/staffPurchaseRoutes');
-
+const staffLoanRoutes = require('./routes/staffLoanRoutes');
 // Controller para subir logo
 const { uploadTenantLogo } = require('./controllers/tenantController');
 
@@ -110,7 +110,7 @@ app.use('/api/cash', cashRoutes);
 app.use('/api/staff-purchases', staffPurchaseRoutes);
 // Subida de logo del tenant (usa tu controller existente)
 app.post('/api/tenants/:tenantId/logo', upload.single('logo'), uploadTenantLogo);
-
+app.use('/api/staff-loans', staffLoanRoutes);
 /* =======================================
     🧯 Manejo sencillo de errores CORS
 ======================================= */

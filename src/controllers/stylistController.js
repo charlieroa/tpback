@@ -78,14 +78,10 @@ exports.suggestStylistByTurn = async (req, res) => {
   }
 
   try {
-    // 1) Duración real del servicio
     const duration = await getServiceDurationMinutes(service_id, tenant_id, 60);
-
-    // 2) Ventana de tiempo (LOCAL)
     const startLocal = makeLocalDate(date, start_time);
     const endLocal = new Date(startLocal.getTime() + duration * 60000);
 
-    // 3) Buscar estilista calificado y disponible
     const suggested = await db.query(
       `
       SELECT u.id, u.first_name, u.last_name
@@ -93,13 +89,13 @@ exports.suggestStylistByTurn = async (req, res) => {
        WHERE u.tenant_id = $1
          AND u.role_id = 3
          AND u.status = 'active'
-         AND EXISTS ( -- calificado para el servicio
+         AND EXISTS (
                SELECT 1
                  FROM stylist_services ss
                 WHERE ss.user_id = u.id
                   AND ss.service_id = $2
          )
-         AND NOT EXISTS ( -- sin solape con citas bloqueantes
+         AND NOT EXISTS (
                SELECT 1
                  FROM appointments a
                 WHERE a.tenant_id  = $1
@@ -118,8 +114,6 @@ exports.suggestStylistByTurn = async (req, res) => {
     }
 
     const stylist = suggested.rows[0];
-
-    // 4) Mover al final de la cola
     await db.query(`UPDATE users SET last_turn_at = NOW() WHERE id = $1`, [stylist.id]);
 
     return res.status(200).json(stylist);
@@ -138,7 +132,6 @@ exports.getStylistServices = async (req, res) => {
   const { id: stylistId } = req.params;
 
   try {
-    // Verifica estilista del tenant
     const u = await db.query(
       `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
       [stylistId, tenant_id]
@@ -147,7 +140,6 @@ exports.getStylistServices = async (req, res) => {
       return res.status(404).json({ message: 'Estilista no encontrado.' });
     }
 
-    // Trae servicios del estilista (solo de su tenant)
     const result = await db.query(
       `
       SELECT s.id, s.name, s.price, s.duration_minutes, s.category_id, c.name AS category_name
@@ -173,6 +165,7 @@ exports.getStylistServices = async (req, res) => {
    POST /api/stylists/:id/services
    Body: { "service_ids": ["uuid1","uuid2", ...] }
    - Reemplaza todas las asignaciones actuales por las recibidas
+   - Usa transacción manual (db.getClient) para ser consistente con tu proyecto
 ============================================================ */
 exports.setStylistServices = async (req, res) => {
   const { tenant_id } = req.user;
@@ -183,61 +176,58 @@ exports.setStylistServices = async (req, res) => {
     return res.status(400).json({ message: 'service_ids debe ser un arreglo.' });
   }
 
+  const client = await db.getClient();
   try {
-    await db.withTransaction(async (client) => {
-      // 1) Verificar estilista del tenant
-      const u = await client.query(
-        `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
-        [stylistId, tenant_id]
+    await client.query('BEGIN');
+
+    const u = await client.query(
+      `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
+      [stylistId, tenant_id]
+    );
+    if (u.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Estilista no encontrado.' });
+    }
+
+    if (service_ids.length > 0) {
+      const valid = await client.query(
+        `SELECT id
+           FROM services
+          WHERE tenant_id = $1
+            AND id = ANY($2::uuid[])`,
+        [tenant_id, service_ids]
       );
-      if (u.rows.length === 0) {
-        const err = new Error('Estilista no encontrado.');
-        err.statusCode = 404;
-        throw err;
+      if (valid.rows.length !== service_ids.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Uno o más servicios no pertenecen a tu tenant.' });
       }
+    }
 
-      // 2) Verificar que los servicios pertenezcan al tenant
-      if (service_ids.length > 0) {
-        const valid = await client.query(
-          `SELECT id
-             FROM services
-            WHERE tenant_id = $1
-              AND id = ANY($2::uuid[])`,
-          [tenant_id, service_ids]
-        );
-        if (valid.rows.length !== service_ids.length) {
-          const err = new Error('Uno o más servicios no pertenecen a tu tenant.');
-          err.statusCode = 400;
-          throw err;
-        }
-      }
+    await client.query(`DELETE FROM stylist_services WHERE user_id = $1`, [stylistId]);
 
-      // 3) Limpiar asignaciones actuales
-      await client.query(`DELETE FROM stylist_services WHERE user_id = $1`, [stylistId]);
+    if (service_ids.length > 0) {
+      // Inserción bulk segura
+      const values = service_ids.map((_, i) => `($1, $${i + 2})`).join(', ');
+      await client.query(
+        `INSERT INTO stylist_services (user_id, service_id) VALUES ${values}`,
+        [stylistId, ...service_ids]
+      );
+    }
 
-      // 4) Insertar nuevas asignaciones (bulk insert)
-      if (service_ids.length > 0) {
-        const values = service_ids.map((_, i) => `($1, $${i + 2})`).join(', ');
-        await client.query(
-          `INSERT INTO stylist_services (user_id, service_id) VALUES ${values}`,
-          [stylistId, ...service_ids]
-        );
-      }
-    });
-
+    await client.query('COMMIT');
     return res.status(200).json({ message: 'Servicios del estilista actualizados con éxito.' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error al asignar servicios al estilista:', error);
-    const status = error.statusCode || 500;
-    return res.status(status).json({ error: error.message || 'Error interno del servidor' });
+    return res.status(500).json({ error: error.message || 'Error interno del servidor' });
+  } finally {
+    client.release();
   }
 };
 
 /* ============================================================
    5) Crear estilista (role_id = 3)
    POST /api/users
-   Body: { first_name, last_name, email, password, phone?, payment_type?, base_salary?, commission_rate? }
-   * tenant_id se toma de req.user (ignora el del body)
 ============================================================ */
 exports.createStylist = async (req, res) => {
   const { tenant_id } = req.user;
@@ -247,7 +237,7 @@ exports.createStylist = async (req, res) => {
     email,
     password,
     phone = null,
-    payment_type = 'salary', // 'salary' | 'commission' | 'mixed' (según tu modelo)
+    payment_type = 'salary', // 'salary' | 'commission' | 'mixed'
     base_salary = 0,
     commission_rate = 0,
   } = req.body;
@@ -257,7 +247,7 @@ exports.createStylist = async (req, res) => {
   }
 
   try {
-    // TODO: hashear password si aún no lo haces en otro lugar
+    // Nota: si tu proyecto ya hashea en authController, aquí no lo repetimos.
     const result = await db.query(
       `
       INSERT INTO users (tenant_id, role_id, first_name, last_name, email, password, phone,
@@ -271,7 +261,6 @@ exports.createStylist = async (req, res) => {
     return res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Error al crear estilista:', error);
-    // Manejo básico de duplicados por email
     if (String(error.message).includes('duplicate key')) {
       return res.status(409).json({ error: 'El email ya está registrado.' });
     }
@@ -282,7 +271,6 @@ exports.createStylist = async (req, res) => {
 /* ============================================================
    6) Listar estilistas del tenant
    GET /api/users/tenant/:tenantId?role_id=3
-   (Se valida que :tenantId === req.user.tenant_id)
 ============================================================ */
 exports.listStylistsByTenant = async (req, res) => {
   const { tenant_id } = req.user;
@@ -346,7 +334,6 @@ exports.updateStylist = async (req, res) => {
   }
 
   try {
-    // Verifica pertenencia al tenant y role_id=3
     const u = await db.query(
       `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
       [id, tenant_id]
@@ -378,14 +365,12 @@ exports.updateStylist = async (req, res) => {
 /* ============================================================
    8) Eliminar estilista
    DELETE /api/users/:id
-   (ON DELETE CASCADE se encarga de stylist_services)
 ============================================================ */
 exports.deleteStylist = async (req, res) => {
   const { tenant_id } = req.user;
   const { id } = req.params;
 
   try {
-    // Verifica pertenencia al tenant y role_id=3
     const u = await db.query(
       `SELECT id FROM users WHERE id = $1 AND tenant_id = $2 AND role_id = 3`,
       [id, tenant_id]

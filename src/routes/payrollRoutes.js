@@ -2,15 +2,22 @@
 const express = require('express');
 const router = express.Router();
 const payrollController = require('../controllers/payrollController');
-// Si usas middleware de autenticación, descomenta esta línea:
-// const authMiddleware = require('../middleware/authMiddleware');
+const authMiddleware = require('../middleware/authMiddleware');
 
-// POST /api/payroll - Generar un pago de nómina
-// router.post('/', authMiddleware, payrollController.createPayroll);
+// Usamos el middleware para proteger TODAS las rutas de este archivo.
+router.use(authMiddleware);
+
+// --- RUTA NUEVA ---
+// GET /api/payrolls/preview -> Para obtener el resumen de nómina sin guardarlo.
+// Lo usa el botón "Cargar Resumen".
+router.get('/preview', payrollController.getPayrollPreview);
+
+// POST /api/payrolls -> Generar y guardar un pago de nómina para un estilista.
+// Lo usa el botón "Generar Nómina".
 router.post('/', payrollController.createPayroll);
 
-// GET /api/payroll/tenant/:tenantId - Obtener todos los registros de nómina
-// router.get('/tenant/:tenantId', authMiddleware, payrollController.getPayrollsByTenant);
-router.get('/tenant/:tenantId', payrollController.getPayrollsByTenant);
+// GET /api/payrolls -> Obtener todos los registros de nómina ya guardados.
+// Lo usa la tabla de "Historial".
+router.get('/', payrollController.getPayrollsByTenant);
 
 module.exports = router;

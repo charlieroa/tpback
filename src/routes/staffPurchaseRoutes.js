@@ -1,26 +1,25 @@
+// =============================================
+// File: src/routes/staffPurchaseRoutes.js
+// (Versión completa para tu controlador)
+// =============================================
 const express = require('express');
 const router = express.Router();
 const staffPurchaseController = require('../controllers/staffPurchaseController');
 const authMiddleware = require('../middleware/authMiddleware');
 
-// Aplicamos el middleware de autenticación a todas las rutas de este archivo.
-// Nadie que no haya iniciado sesión podrá acceder a estas funciones.
+// Proteger todas las rutas del módulo
 router.use(authMiddleware);
 
-
-// --- Rutas para la Gestión de Compras del Personal ---
-
-// CREAR una nueva compra de productos para un estilista
-// POST /api/staff-purchases
+// POST   /api/staff-purchases -> Crear una nueva compra de personal
 router.post('/', staffPurchaseController.createPurchase);
 
-// OBTENER todas las compras de un estilista específico
-// GET /api/staff-purchases/stylist/:stylistId
+// GET    /api/staff-purchases/stylist/:stylistId -> Listar compras de un estilista
 router.get('/stylist/:stylistId', staffPurchaseController.getPurchasesByStylist);
 
-// ACTUALIZAR el estado de una compra (ej. 'pendiente' -> 'deducido')
-// PUT /api/staff-purchases/:purchaseId/status
-router.put('/:purchaseId/status', staffPurchaseController.updatePurchaseStatus);
+// GET    /api/staff-purchases/:purchaseId -> Ver el detalle de una compra
+router.get('/:purchaseId', staffPurchaseController.getPurchaseWithItems);
 
+// PATCH  /api/staff-purchases/:purchaseId/status -> Actualizar el estado de una compra
+router.patch('/:purchaseId/status', staffPurchaseController.updatePurchaseStatus);
 
 module.exports = router;
