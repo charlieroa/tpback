@@ -1,7 +1,6 @@
-// src/controllers/payrollController.js
 const db = require('../config/db');
 
-// --- FUNCIÓN AJUSTADA Y MEJORADA ---
+// --- CREACIÓN DE NÓMINA INDIVIDUAL ---
 exports.createPayroll = async (req, res) => {
     const { tenant_id } = req.user; 
     const { stylist_id, start_date, end_date } = req.body;
@@ -10,20 +9,17 @@ exports.createPayroll = async (req, res) => {
         return res.status(400).json({ error: 'Faltan campos obligatorios: stylist_id, start_date, end_date.' });
     }
 
-    const client = await db.getClient(); // Usaremos un cliente para la transacción
+    const client = await db.getClient();
     try {
         await client.query('BEGIN');
 
-        // MEJORA 1: Verificar si la nómina ya existe para este período
         const existingPayroll = await client.query(
             `SELECT id FROM payroll WHERE tenant_id = $1 AND stylist_id = $2 AND start_date = $3 AND end_date = $4`,
             [tenant_id, stylist_id, start_date, end_date]
         );
 
         if (existingPayroll.rowCount > 0) {
-            // Si ya existe, no hacemos nada y devolvemos un mensaje informativo.
-            // Esto evita duplicados cuando se procesa en lote.
-            await client.query('ROLLBACK'); // Anulamos la transacción iniciada
+            await client.query('ROLLBACK');
             return res.status(200).json({ message: `La nómina para el estilista ${stylist_id} en este período ya existe. Se omitió.` });
         }
 
@@ -34,7 +30,6 @@ exports.createPayroll = async (req, res) => {
         const tenantRes = await client.query(`SELECT admin_fee_enabled, admin_fee_rate FROM tenants WHERE id = $1`, [tenant_id]);
         const { admin_fee_enabled, admin_fee_rate } = tenantRes.rows[0] || {};
         
-        // ... (Toda la lógica de cálculo se mantiene igual)
         const svcRes = await client.query(`WITH params AS (SELECT $1::uuid AS tenant_id, $2::timestamptz AS start_ts, $3::timestamptz AS end_ts) SELECT COALESCE(SUM(ii.commission_value), 0) AS service_commissions, COALESCE(SUM(ii.total_price), 0) AS service_sales_amount FROM invoice_items ii JOIN invoices inv ON inv.id = ii.invoice_id JOIN appointments ap ON ap.id = ii.related_id JOIN params p ON p.tenant_id = inv.tenant_id WHERE ii.item_type = 'service' AND inv.tenant_id = p.tenant_id AND ap.stylist_id = $4 AND inv.created_at >= p.start_ts AND inv.created_at < p.end_ts AND inv.status IN ('paid','closed','completed')`, [tenant_id, start_date, end_date, stylist_id]);
         const { service_commissions, service_sales_amount } = svcRes.rows[0];
         
@@ -56,7 +51,6 @@ exports.createPayroll = async (req, res) => {
         const gross_total = calculated_base_salary + commissions_total;
         const net_paid = gross_total - advances_deducted - admin_fee_value;
 
-        // MEJORA 2: Guardamos el % de comisión del estilista
         const payrollResult = await client.query(
             `INSERT INTO payroll (tenant_id, stylist_id, start_date, end_date, base_salary, commissions, total_paid, payment_date, commission_rate_snapshot)
              VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8) RETURNING *;`,
@@ -64,7 +58,7 @@ exports.createPayroll = async (req, res) => {
         );
         
         await client.query('COMMIT');
-        return res.status(201).json({ ...payrollResult.rows[0] }); // Devolvemos solo el resultado del guardado
+        return res.status(201).json({ ...payrollResult.rows[0] });
 
     } catch (error) {
         await client.query('ROLLBACK');
@@ -75,8 +69,7 @@ exports.createPayroll = async (req, res) => {
     }
 };
 
-
-// Actualizamos la función que lee el historial para que también traiga la nueva columna
+// --- OBTENER HISTORIAL DE NÓMINAS ---
 exports.getPayrollsByTenant = async (req, res) => {
     const { tenant_id } = req.user; 
     try {
@@ -94,17 +87,20 @@ exports.getPayrollsByTenant = async (req, res) => {
     }
 };
 
-// La función de PREVIEW no necesita cambios, ya que no guarda nada.
-exports.getPayrollPreview = async (req, res) => {
-    // ... (este código se queda como estaba)
+// --- VISTA PREVIA SIMPLE (REUTILIZABLE) ---
+exports.getPayrollPreview = async (req, res, returnData = false) => {
     const { tenant_id } = req.user;
     const { start_date, end_date } = req.query;
 
-    if (!start_date || !end_date) { return res.status(400).json({ error: 'Se requieren start_date y end_date.' });}
+    if (!start_date || !end_date) {
+        const error = { error: 'Se requieren start_date y end_date.' };
+        if (returnData) return error;
+        return res.status(400).json(error);
+    }
 
     const client = await db.getClient();
     try {
-        const stylistsRes = await client.query(`SELECT id, first_name, last_name, base_salary FROM users WHERE tenant_id = $1 AND role_id = 3 AND is_active = true`,[tenant_id]);
+        const stylistsRes = await client.query(`SELECT id, first_name, last_name, base_salary FROM users WHERE tenant_id = $1 AND role_id = 3 AND is_active = true`, [tenant_id]);
         const stylists = stylistsRes.rows;
         const previewResults = [];
         for (const stylist of stylists) {
@@ -121,9 +117,94 @@ exports.getPayrollPreview = async (req, res) => {
                 previewResults.push({ stylist_id: stylist.id, stylist_name: `${stylist.first_name} ${stylist.last_name || ''}`.trim(), gross_total, total_deductions, net_paid, service_commissions, product_commissions, base_salary });
             }
         }
+        
+        if (returnData) {
+            return previewResults;
+        }
         res.status(200).json(previewResults);
+
     } catch (error) {
         console.error("Error al generar la vista previa de la nómina:", error);
+        if (returnData) return { error: 'Error interno del servidor' };
+        res.status(500).json({ error: 'Error interno del servidor' });
+    } finally {
+        client.release();
+    }
+};
+
+
+// En: src/controllers/payrollController.js
+
+// ... (las otras funciones como createPayroll, etc., se mantienen igual) ...
+
+exports.getPayrollDetailedPreview = async (req, res) => {
+    const { tenant_id } = req.user;
+    const { start_date, end_date } = req.query;
+
+    if (!start_date || !end_date) {
+        return res.status(400).json({ error: 'Se requieren start_date y end_date.' });
+    }
+    
+    const client = await db.getClient();
+    try {
+        const previewSummary = await exports.getPayrollPreview({ user: req.user, query: req.query }, res, true);
+        if (previewSummary.error) { throw new Error(previewSummary.error); }
+
+        // ✅ QUERY CORREGIDA PARA LOS WIDGETS
+        const summaryRes = await client.query(
+            `SELECT
+                COALESCE(SUM(p.amount) FILTER (WHERE p.payment_method = 'cash'), 0) AS cash,
+                COALESCE(SUM(p.amount) FILTER (WHERE p.payment_method = 'credit_card'), 0) AS "creditCard",
+                (SELECT COALESCE(SUM(ii.total_price), 0) FROM invoice_items ii JOIN invoices i ON ii.invoice_id = i.id WHERE ii.item_type = 'product' AND i.tenant_id = $1 AND i.created_at >= $2 AND i.created_at < $3) AS "inventorySold",
+                (SELECT COALESCE(SUM(cm.amount), 0) FROM cash_movements cm WHERE cm.type = 'payroll_advance' AND cm.tenant_id = $1 AND cm.created_at >= $2 AND cm.created_at < $3) AS "stylistExpenses"
+            FROM payments p
+            -- ✅ CORRECCIÓN: Unimos con invoices para poder filtrar por la fecha correcta.
+            JOIN invoices inv ON p.invoice_id = inv.id
+            -- ✅ CORRECCIÓN: Usamos la fecha de la factura (inv.created_at) en lugar de la del pago.
+            WHERE p.tenant_id = $1 AND inv.created_at >= $2 AND inv.created_at < $3`,
+            [tenant_id, start_date, end_date]
+        );
+
+        // El resto de la función no necesita cambios...
+        const servicesRes = await client.query(
+            `SELECT 
+                ap.stylist_id, inv.id as invoice_id, c.first_name || ' ' || c.last_name as client_name, s.name as service_name, ii.total_price as value, ii.commission_value
+             FROM invoice_items ii JOIN invoices inv ON ii.invoice_id = inv.id JOIN appointments ap ON ii.related_id = ap.id JOIN services s ON ap.service_id = s.id JOIN users c on inv.client_id = c.id
+             WHERE ii.item_type = 'service' AND inv.tenant_id = $1 AND inv.created_at >= $2 AND inv.created_at < $3`,
+            [tenant_id, start_date, end_date]
+        );
+        const productsRes = await client.query(
+            `SELECT 
+                ii.seller_id as stylist_id, p.name as product_name, ii.quantity, ii.total_price as value, ii.commission_value
+            FROM invoice_items ii JOIN invoices inv ON ii.invoice_id = inv.id JOIN products p ON ii.related_id = p.id
+            WHERE ii.item_type = 'product' AND inv.tenant_id = $1 AND inv.created_at >= $2 AND inv.created_at < $3`,
+            [tenant_id, start_date, end_date]
+        );
+        const advancesRes = await client.query(
+            `SELECT 
+                related_entity_id as stylist_id, amount, description, created_at 
+             FROM cash_movements WHERE type = 'payroll_advance' AND tenant_id = $1 AND created_at >= $2 AND created_at < $3`,
+            [tenant_id, start_date, end_date]
+        );
+        
+        const detailsByStylist = {};
+        const initializeStylist = (stylistId) => { if (!detailsByStylist[stylistId]) { detailsByStylist[stylistId] = { services: [], products: [], expenses: [] }; } };
+        servicesRes.rows.forEach(item => { initializeStylist(item.stylist_id); detailsByStylist[item.stylist_id].services.push(item); });
+        productsRes.rows.forEach(item => { if(!item.stylist_id) return; initializeStylist(item.stylist_id); detailsByStylist[item.stylist_id].products.push(item); });
+        advancesRes.rows.forEach(item => { initializeStylist(item.stylist_id); detailsByStylist[item.stylist_id].expenses.push(item); });
+
+        const stylist_breakdowns = previewSummary.map(stylist => ({
+            ...stylist,
+            details: detailsByStylist[stylist.stylist_id] || { services: [], products: [], expenses: [] }
+        }));
+        
+        res.status(200).json({
+            summary_widgets: summaryRes.rows[0] || { cash: 0, creditCard: 0, inventorySold: 0, stylistExpenses: 0 },
+            stylist_breakdowns: stylist_breakdowns
+        });
+
+    } catch (error) {
+        console.error("Error al generar el desglose detallado de la nómina:", error);
         res.status(500).json({ error: 'Error interno del servidor' });
     } finally {
         client.release();
