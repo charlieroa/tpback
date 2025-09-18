@@ -1,11 +1,11 @@
-// Contenido COMPLETO y FINAL para: src/controllers/authController.js
+// Contenido COMPLETO y CORREGIDO para: src/controllers/authController.js
 
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const slugify = require('slugify');
 
-// --- Función para Iniciar Sesión ---
+// --- Función para Iniciar Sesión (VERSIÓN MEJORADA Y COMPLETA) ---
 exports.login = async (req, res) => {
     const { email, password } = req.body;
 
@@ -26,6 +26,45 @@ exports.login = async (req, res) => {
             return res.status(401).json({ error: 'Credenciales inválidas.' });
         }
 
+        // --- INICIO DE LA LÓGICA DE VERIFICACIÓN AVANZADA ---
+        let isSetupComplete = false;
+        if (user.tenant_id) {
+            // 1. Obtenemos los datos del Tenant (básicos y horarios)
+            const tenantResult = await db.query(
+                'SELECT name, address, phone, working_hours FROM tenants WHERE id = $1',
+                [user.tenant_id]
+            );
+            
+            // 2. Obtenemos el conteo de servicios y de personal (estilistas)
+            const servicesCountResult = await db.query('SELECT COUNT(id) FROM services WHERE tenant_id = $1', [user.tenant_id]);
+            const staffCountResult = await db.query("SELECT COUNT(id) FROM users WHERE tenant_id = $1 AND role_id = 3", [user.tenant_id]);
+
+            if (tenantResult.rows.length > 0) {
+                const tenant = tenantResult.rows[0];
+                const servicesCount = parseInt(servicesCountResult.rows[0].count, 10);
+                const staffCount = parseInt(staffCountResult.rows[0].count, 10);
+
+                // Verificación de datos básicos (ignorando espacios en blanco)
+                const hasBasicInfo = !!(tenant.name?.trim() && tenant.address?.trim() && tenant.phone?.trim());
+                
+                // Verificación de horarios (al menos un día debe estar activo y no ser 'cerrado')
+                const hours = tenant.working_hours || {};
+                const hasActiveHours = Object.values(hours).some(daySchedule => daySchedule !== 'cerrado');
+                
+                // Verificación de servicios
+                const hasServices = servicesCount > 0;
+                
+                // Verificación de personal
+                const hasStaff = staffCount > 0;
+                
+                // 3. La configuración solo está completa si los 4 checks son verdaderos
+                if (hasBasicInfo && hasActiveHours && hasServices && hasStaff) {
+                    isSetupComplete = true;
+                }
+            }
+        }
+        // --- FIN DE LA LÓGICA DE VERIFICACIÓN ---
+
         const payload = {
             user: {
                 id: user.id,
@@ -40,7 +79,21 @@ exports.login = async (req, res) => {
             { expiresIn: '8h' },
             (err, token) => {
                 if (err) throw err;
-                res.json({ token });
+
+                const userForResponse = {
+                    id: user.id,
+                    first_name: user.first_name,
+                    last_name: user.last_name,
+                    email: user.email,
+                    role_id: user.role_id,
+                    tenant_id: user.tenant_id
+                };
+
+                res.json({
+                    token,
+                    user: userForResponse,
+                    setup_complete: isSetupComplete
+                });
             }
         );
 
@@ -50,7 +103,7 @@ exports.login = async (req, res) => {
     }
 };
 
-// --- Función para Registrar Dueño y Peluquería ---
+// --- Función para Registrar Dueño y Peluquería (SIN CAMBIOS) ---
 const createSlug = (text) => {
     return slugify(text, { lower: true, strict: true, remove: /[*+~.()'"!:@]/g });
 };
@@ -63,12 +116,10 @@ exports.registerTenantAndAdmin = async (req, res) => {
     }
 
     try {
-        // Inicia una transacción para asegurar que todo se complete o no se complete nada
         await db.query('BEGIN');
 
         const slug = createSlug(tenantName);
         
-        // CORRECCIÓN: Se agrega el email en la creación del tenant
         const tenantResult = await db.query(
             'INSERT INTO tenants (name, email, slug) VALUES ($1, $2, $3) RETURNING id',
             [tenantName, adminEmail, slug]
@@ -84,13 +135,11 @@ exports.registerTenantAndAdmin = async (req, res) => {
             [newTenantId, adminFirstName, adminEmail, password_hash]
         );
         
-        // Confirma la transacción
         await db.query('COMMIT');
         
         res.status(201).json(adminResult.rows[0]);
 
     } catch (error) {
-        // En caso de error, revierte la transacción
         await db.query('ROLLBACK');
         console.error("Error en el registro de tenant y admin:", error);
         
