@@ -1,30 +1,21 @@
 // =============================================
-// File: src/index.js (Versión Completa para Depuración)
+// Archivo Principal de la API: src/index.js
 // =============================================
 
-// ¡ESTA ES LA LÍNEA MÁS IMPORTANTE! DEBE SER LA PRIMERA DE TODAS.
-// MODO DEBUG ACTIVADO PARA VER QUÉ HACE DOTENV.
-require('dotenv').config({ debug: true });
+// Carga las variables de entorno del archivo .env al inicio de todo.
+require('dotenv').config();
 
-// AÑADIMOS ESTE BLOQUE PARA VERIFICAR LAS VARIABLES INMEDIATAMENTE.
-console.log('--- VERIFICANDO VARIABLES DE ENTORNO INMEDIATAMENTE ---');
-console.log('Valor de PGHOST:', process.env.PGHOST);
-console.log('Valor de PGDATABASE:', process.env.PGDATABASE);
-console.log('¿Existe PGPASSWORD?:', !!process.env.PGPASSWORD);
-console.log('----------------------------------------------------');
-
-
-// El resto de tus imports vienen DESPUÉS.
+// Módulos principales
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 
-// Ahora, al importar db.js, las variables de entorno ya existen.
+// Configuración de la base de datos (se importa después de dotenv)
 const db = require('./config/db');
 
-// Rutas
+// Importación de todas las rutas
 const tenantRoutes = require('./routes/tenantRoutes');
 const userRoutes = require('./routes/userRoutes');
 const serviceRoutes = require('./routes/serviceRoutes');
@@ -39,71 +30,76 @@ const cashRoutes = require('./routes/cashRoutes');
 const productCategoryRoutes = require('./routes/productCategoryRoutes');
 const staffPurchaseRoutes = require('./routes/staffPurchaseRoutes');
 const staffLoanRoutes = require('./routes/staffLoanRoutes');
-// Controller para subir logo
 const { uploadTenantLogo } = require('./controllers/tenantController');
 
+// Inicialización de la aplicación Express
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+
 /* =======================================
-    🛡️ CORS (local + producción)
+    🛡️ CONFIGURACIÓN DE CORS
 ======================================= */
+// Lista de orígenes permitidos (clientes que pueden hacer peticiones a esta API)
 const allowedOrigins = [
-  'http://localhost:3001',
-  'https://tpia.tupelukeria.com',
+  'http://localhost:3001',          // Para desarrollo local
+  'https://app.tupelukeria.com',  // ¡EL ORIGEN CORRECTO DE TU FRONTEND!
+  'https://tpia.tupelukeria.com', // Lo mantengo por si lo usas para otra cosa
 ];
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error('No permitido por CORS: ' + origin));
-    },
-    credentials: true,
-  })
-);
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Permitir peticiones sin origen (ej. Postman, apps móviles) o que estén en la lista blanca
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('No permitido por la política de CORS.'));
+    }
+  },
+  credentials: true, // Permite que el frontend envíe cookies o cabeceras de autorización
+};
+
+app.use(cors(corsOptions));
+
 
 /* =======================================
-    🚀 Middlewares base
+    🚀 MIDDLEWARES ESENCIALES
 ======================================= */
+// Para poder entender JSON en el cuerpo de las peticiones
 app.use(express.json());
 
+
 /* =======================================
-    🗂️ Archivos estáticos (logos, etc.)
+    🗂️ SERVICIO DE ARCHIVOS ESTÁTICOS
 ======================================= */
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const UPLOADS_DIR = path.join(PUBLIC_DIR, 'uploads');
 const LOGOS_DIR = path.join(UPLOADS_DIR, 'logos');
 
+// Asegurarse de que el directorio de logos exista
 fs.mkdirSync(LOGOS_DIR, { recursive: true });
 
+// Servir la carpeta 'public' para acceso general
 app.use(express.static(PUBLIC_DIR));
-app.use('/uploads', express.static(UPLOADS_DIR));
-app.use('/api/uploads', express.static(UPLOADS_DIR));
+
 
 /* =======================================
-    ⬆️ Subida de archivos (Multer) para logos
+    ⬆️ CONFIGURACIÓN DE SUBIDA DE ARCHIVOS (MULTER)
 ======================================= */
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, LOGOS_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '');
-    cb(null, `logo-${req.params.tenantId}-${Date.now()}${ext}`);
-  },
+  destination: (_req, _file, cb) => cb(null, LOGOS_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname || '');
+    cb(null, `logo-${req.params.tenantId}-${Date.now()}${ext}`);
+  },
 });
 const upload = multer({ storage });
 
-/* =======================================
-    📡 Endpoint de prueba
-======================================= */
-app.get('/', (_req, res) => {
-  res.send('¡El servidor del sistema de peluquerías está funcionando!');
-});
 
 /* =======================================
-    📦 Rutas API
+    📡 RUTAS DE LA APLICACIÓN
 ======================================= */
+app.get('/', (_req, res) => res.send('¡API de TuPelukeria.com funcionando!'));
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/users', userRoutes);
@@ -117,43 +113,44 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/product-categories', productCategoryRoutes);
 app.use('/api/cash', cashRoutes);
 app.use('/api/staff-purchases', staffPurchaseRoutes);
-app.post('/api/tenants/:tenantId/logo', upload.single('logo'), uploadTenantLogo);
 app.use('/api/staff-loans', staffLoanRoutes);
+// Ruta específica para la subida del logo
+app.post('/api/tenants/:tenantId/logo', upload.single('logo'), uploadTenantLogo);
+
 
 /* =======================================
-    🧯 Manejo sencillo de errores CORS
-======================================= */
-app.use((err, _req, res, next) => {
-  if (err && typeof err.message === 'string' && err.message.startsWith('No permitido por CORS:')) {
-    return res.status(403).json({ error: err.message });
-  }
-  return next(err);
-});
-
-/* =======================================
-    ❤️ Healthchecks
+    ❤️ HEALTHCHECK (VERIFICACIÓN DE ESTADO)
 ======================================= */
 app.get(['/health', '/api/health'], async (_req, res) => {
-  try {
-    const result = await db.healthCheck();
-    if (result.ok) {
-        res.json({ ok: true, app: 'up', db: 'up', now: new Date().toISOString() });
-    } else {
-        throw new Error(result.error);
-    }
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      app: 'up',
-      db: 'down',
-      error: e?.message || String(e),
-    });
-  }
+  try {
+    await db.healthCheck();
+    res.status(200).json({ status: 'ok', app: 'up', db: 'up' });
+  } catch (e) {
+    res.status(503).json({ status: 'error', app: 'up', db: 'down', error: e.message });
+  }
 });
 
+
 /* =======================================
-    ▶️ Iniciar servidor
+    🧯 MANEJO DE ERRORES (DEBE IR AL FINAL)
+======================================= */
+app.use((err, req, res, next) => {
+  // Loguear el error para depuración
+  console.error(`[ERROR] ${req.method} ${req.url} - ${err.stack}`);
+
+  // Manejo específico para errores de CORS
+  if (err.message === 'No permitido por la política de CORS.') {
+    return res.status(403).json({ error: 'Acceso denegado por CORS.' });
+  }
+
+  // Respuesta de error genérica para el cliente
+  res.status(500).json({ error: 'Ocurrió un error inesperado en el servidor.' });
+});
+
+
+/* =======================================
+    ▶️ INICIO DEL SERVIDOR
 ======================================= */
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
 });
