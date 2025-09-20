@@ -121,7 +121,7 @@ exports.createUser = async (req, res) => {
 
     const result = await db.query(
       `INSERT INTO users (
-         tenant_id, role_id, first_name, last_name, email, password, phone,
+         tenant_id, role_id, first_name, last_name, email, password_hash, phone,
          payment_type, base_salary, commission_rate, working_hours
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *`,
