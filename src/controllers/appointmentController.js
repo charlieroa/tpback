@@ -2,7 +2,7 @@
 const db = require('../config/db');
 
 // --- ZONA HORARIA ---
-const { zonedTimeToUtc, utcToZonedTime } = require('date-fns-tz');
+const { zonedTimeToUtc, utcToZonedTime, formatInTimeZone } = require('date-fns-tz');
 const TIME_ZONE = 'America/Bogota';
 
 // --- CONSTANTES Y HELPERS ---
@@ -26,14 +26,11 @@ async function getServiceDurationMinutes(service_id, fallback = 60) {
 }
 
 // --- FECHAS/HORAS (LOCAL → UTC) ---
-// Construye un Date en UTC a partir de una fecha local (Bogotá) y una hora HH:mm o HH:mm:ss
 function makeLocalUtc(dateStr, timeStr) {
   const t = (timeStr && timeStr.length === 5) ? `${timeStr}:00` : (timeStr || '00:00:00');
-  // Ej: "2025-09-22 14:30:00" interpretado en TZ America/Bogota, convertido a UTC Date
   return zonedTimeToUtc(`${dateStr} ${t}`, TIME_ZONE);
 }
 
-// Devuelve el day-of-week (0..6) de la fecha local en Bogotá
 function getLocalJsDow(dateStr) {
   const utc = zonedTimeToUtc(`${dateStr} 00:00:00`, TIME_ZONE);
   const backToZoned = utcToZonedTime(utc, TIME_ZONE);
@@ -112,7 +109,7 @@ function buildSlotsFromRanges(dateStr, ranges, stepMinutes) {
 }
 
 function getDayRangesFromWorkingHours(workingHours, dateStr) {
-  const jsDow = getLocalJsDow(dateStr); // ← Bogotá
+  const jsDow = getLocalJsDow(dateStr);
   const spaKey = DAY_KEYS_SPA[jsDow];
   const engKey = DAY_KEYS_ENG[jsDow];
 
@@ -146,7 +143,7 @@ function getDayRangesFromWorkingHours(workingHours, dateStr) {
   return [];
 }
 
-// ✅ Helper nuevo: obtiene los rangos efectivos del estilista (heredando si corresponde)
+// ✅ Herencia de horario del estilista
 function getEffectiveStylistDayRanges(stylistWH, tenantWH, dateStr) {
   if (stylistWH === null) {
     return getDayRangesFromWorkingHours(tenantWH, dateStr);
@@ -169,7 +166,6 @@ exports.createAppointment = async (req, res) => {
   }
 
   try {
-    // Valida skill
     const skillCheck = await db.query(
       'SELECT 1 FROM stylist_services WHERE user_id = $1 AND service_id = $2',
       [stylist_id, service_id]
@@ -180,14 +176,12 @@ exports.createAppointment = async (req, res) => {
 
     const duration = await getServiceDurationMinutes(service_id, 60);
 
-    // start_time debe venir ISO con zona (o UTC). Lo respetamos tal cual:
     const startTimeDate = new Date(start_time);
     if (isNaN(startTimeDate)) {
       return res.status(400).json({ error: 'start_time inválido. Envíe ISO 8601 con zona o UTC.' });
     }
     const endTimeDate = new Date(startTimeDate.getTime() + duration * 60000);
 
-    // Chequeo solapamiento
     const overlap = await db.query(
       `SELECT id FROM appointments
        WHERE stylist_id = $1
@@ -246,7 +240,7 @@ exports.createAppointmentsBatch = async (req, res) => {
     for (const appt of appointments) {
       const { stylist_id, service_id, start_time } = appt;
       if (!stylist_id || !service_id || !start_time) {
-        throw new Error('Cada cita debe tener stylist_id, service_id y start_time.');
+        throw new Error('Cada cita debe tener stylist_id, servicio y start_time.');
       }
 
       const skillCheck = await db.query(
@@ -422,7 +416,7 @@ exports.getAvailability = async (req, res) => {
     const tenantWorkingHours = tenantResult.rows[0].working_hours || {};
     const tenantDayRanges = getDayRangesFromWorkingHours(tenantWorkingHours, date);
     if (!Array.isArray(tenantDayRanges) || tenantDayRanges.length === 0) {
-      return res.status(200).json({ availableSlots: [], message: 'El salón no está abierto en esta fecha.' });
+      return res.status(200).json({ availableSlots: [], availableSlots_meta: [], message: 'El salón no está abierto en esta fecha.' });
     }
 
     // Horario del estilista (null -> hereda tenant)
@@ -442,13 +436,13 @@ exports.getAvailability = async (req, res) => {
       date
     );
     if (!Array.isArray(stylistDayRanges) || stylistDayRanges.length === 0) {
-      return res.status(200).json({ availableSlots: [], message: 'El estilista no trabaja en esta fecha.' });
+      return res.status(200).json({ availableSlots: [], availableSlots_meta: [], message: 'El estilista no trabaja en esta fecha.' });
     }
 
     // Intersección efectiva
     const effectiveDayRanges = intersectRangesArrays(tenantDayRanges, stylistDayRanges);
     if (effectiveDayRanges.length === 0) {
-      return res.status(200).json({ availableSlots: [], message: 'La hora laboral del estilista no coincide con la del salón.' });
+      return res.status(200).json({ availableSlots: [], availableSlots_meta: [], message: 'La hora laboral del estilista no coincide con la del salón.' });
     }
 
     // Citas existentes bloqueantes (día)
@@ -464,7 +458,7 @@ exports.getAvailability = async (req, res) => {
 
     // Construcción de slots (UTC)
     const allSlots = buildSlotsFromRanges(date, effectiveDayRanges, serviceDuration);
-    const availableSlots = allSlots.filter((slot) => {
+    const availableSlotsDates = allSlots.filter((slot) => {
       const slotEnd = new Date(slot.getTime() + serviceDuration * 60000);
       return !existingAppointments.some((appt) => {
         const apptStart = new Date(appt.start_time);
@@ -473,7 +467,20 @@ exports.getAvailability = async (req, res) => {
       });
     });
 
-    return res.status(200).json({ availableSlots });
+    // Meta con UTC y hora local Bogotá
+    const availableSlots_meta = availableSlotsDates.map(d => ({
+      utc: d.toISOString(),
+      local: formatInTimeZone(d, TIME_ZONE, "yyyy-MM-dd'T'HH:mm:ssXXX"),
+      local_time: formatInTimeZone(d, TIME_ZONE, 'HH:mm'),
+    }));
+
+    // COMPAT: array "HH:mm" como antes
+    const availableSlotsDisplay = availableSlots_meta.map(s => s.local_time);
+
+    return res.status(200).json({
+      availableSlots: availableSlotsDisplay,
+      availableSlots_meta
+    });
   } catch (error) {
     console.error('Error al obtener disponibilidad para estilista:', error);
     return res.status(500).json({ error: 'Error interno del servidor' });
@@ -488,14 +495,12 @@ exports.getAvailableStylistsByTime = async (req, res) => {
     return res.status(400).json({ error: 'Faltan parámetros obligatorios: service_id, date, time.' });
   }
 
-  // ✅ Ajuste clave: construir la hora solicitada como LOCAL (Bogotá) -> UTC
   const requestedStartDateTime = makeLocalUtc(date, time);
 
   try {
     const serviceDuration = await getServiceDurationMinutes(service_id, 60);
     const requestedEndDateTime = new Date(requestedStartDateTime.getTime() + serviceDuration * 60000);
 
-    // Horario del tenant
     const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantIdFromToken]);
     if (tenantResult.rows.length === 0) {
       return res.status(404).json({ error: 'Tenant no encontrado.' });
@@ -503,7 +508,6 @@ exports.getAvailableStylistsByTime = async (req, res) => {
     const tenantWorkingHours = tenantResult.rows[0].working_hours || {};
     const tenantDayRanges = getDayRangesFromWorkingHours(tenantWorkingHours, date);
 
-    // Verifica que el tenant esté abierto (comparando en UTC, pero construyendo desde local)
     let isTenantOpenAtRequestedTime = false;
     for (const range of tenantDayRanges) {
       const [openTime, closeTime] = range.split('-').map(s => s.trim());
@@ -518,7 +522,6 @@ exports.getAvailableStylistsByTime = async (req, res) => {
       return res.status(200).json({ availableStylists: [], message: 'El salón no está abierto para este servicio en la hora solicitada.' });
     }
 
-    // Estilistas que saben hacer el servicio
     const stylistsResult = await db.query(
       `SELECT u.id, u.first_name, u.last_name, u.working_hours, ss.last_completed_at
        FROM users u
@@ -543,7 +546,6 @@ exports.getAvailableStylistsByTime = async (req, res) => {
       const effectiveRanges = intersectRangesArrays(tenantDayRanges, stylistDayRanges);
       if (effectiveRanges.length === 0) continue;
 
-      // ¿Cabe el servicio completo dentro de algún rango?
       let fitsWorkingRange = false;
       for (const r of effectiveRanges) {
         const [o, c] = r.split('-').map(s => s.trim());
@@ -556,7 +558,6 @@ exports.getAvailableStylistsByTime = async (req, res) => {
       }
       if (!fitsWorkingRange) continue;
 
-      // ¿Sin solapamiento con otras citas?
       const overlap = await db.query(
         `SELECT id FROM appointments
          WHERE stylist_id = $1
@@ -591,11 +592,9 @@ exports.validateAppointment = async (req, res) => {
 
   try {
     const duration = await getServiceDurationMinutes(service_id, 60);
-    // ✅ Local (Bogotá) → UTC
     const start = makeLocalUtc(date, time);
     const end = new Date(start.getTime() + duration * 60000);
 
-    // Tenant WH
     const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenant_id]);
     if (tenantResult.rows.length === 0) {
       return res.status(404).json({ error: 'Tenant no encontrado.' });
@@ -611,7 +610,6 @@ exports.validateAppointment = async (req, res) => {
       return res.status(200).json({ valid: false, reason: 'El salón no está abierto a esa hora.' });
     }
 
-    // Stylist WH (null -> hereda tenant)
     const stylistRes = await db.query(
       'SELECT working_hours FROM users WHERE id = $1 AND role_id = 3 AND tenant_id = $2',
       [stylist_id, tenant_id]
@@ -636,7 +634,6 @@ exports.validateAppointment = async (req, res) => {
       return res.status(200).json({ valid: false, reason: 'El estilista no trabaja a esa hora.' });
     }
 
-    // Sin solapamiento con citas existentes
     const overlap = await db.query(
       `SELECT id FROM appointments
        WHERE stylist_id = $1
@@ -770,7 +767,7 @@ exports.getTenantSlots = async (req, res) => {
     const tenantWorking = tenantResult.rows[0].working_hours || {};
     const tenantRanges = getDayRangesFromWorkingHours(tenantWorking, date);
     if (!Array.isArray(tenantRanges) || tenantRanges.length === 0) {
-      return res.status(200).json({ slots: [], message: 'El salón está cerrado en esta fecha.' });
+      return res.status(200).json({ slots: [], slots_meta: [], message: 'El salón está cerrado en esta fecha.' });
     }
 
     let step;
@@ -781,7 +778,21 @@ exports.getTenantSlots = async (req, res) => {
     }
 
     const slots = buildSlotsFromRanges(date, tenantRanges, step);
-    return res.status(200).json({ slots });
+
+    // NUEVO: meta detallada
+    const slots_meta = slots.map(d => ({
+      utc: d.toISOString(),
+      local: formatInTimeZone(d, TIME_ZONE, "yyyy-MM-dd'T'HH:mm:ssXXX"),
+      local_time: formatInTimeZone(d, TIME_ZONE, 'HH:mm'),
+    }));
+
+    // COMPAT: lo que el front esperaba
+    const slotsDisplay = slots_meta.map(s => s.local_time);
+
+    return res.status(200).json({
+      slots: slotsDisplay,
+      slots_meta
+    });
   } catch (error) {
     console.error('Error al obtener slots del tenant:', error);
     return res.status(500).json({ error: 'Error interno del servidor' });
