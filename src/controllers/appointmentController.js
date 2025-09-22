@@ -1,12 +1,17 @@
 // src/controllers/appointmentController.js
 const db = require('../config/db');
 
+// --- ZONA HORARIA ---
+const { zonedTimeToUtc, utcToZonedTime } = require('date-fns-tz');
+const TIME_ZONE = 'America/Bogota';
+
 // --- CONSTANTES Y HELPERS ---
 const BLOCKING_STATUSES = ['scheduled','rescheduled','checked_in','checked_out','pending_approval'];
 const DAY_KEYS_SPA = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
 const DAY_KEYS_ENG = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// --- DURACIÓN DE SERVICIO ---
 async function getServiceDurationMinutes(service_id, fallback = 60) {
   try {
     if (!service_id || !UUID_RE.test(service_id)) return fallback;
@@ -20,11 +25,22 @@ async function getServiceDurationMinutes(service_id, fallback = 60) {
   }
 }
 
-function makeLocalDate(dateStr, timeStr) {
-  const t = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
-  return new Date(`${dateStr}T${t}`);
+// --- FECHAS/HORAS (LOCAL → UTC) ---
+// Construye un Date en UTC a partir de una fecha local (Bogotá) y una hora HH:mm o HH:mm:ss
+function makeLocalUtc(dateStr, timeStr) {
+  const t = (timeStr && timeStr.length === 5) ? `${timeStr}:00` : (timeStr || '00:00:00');
+  // Ej: "2025-09-22 14:30:00" interpretado en TZ America/Bogota, convertido a UTC Date
+  return zonedTimeToUtc(`${dateStr} ${t}`, TIME_ZONE);
 }
 
+// Devuelve el day-of-week (0..6) de la fecha local en Bogotá
+function getLocalJsDow(dateStr) {
+  const utc = zonedTimeToUtc(`${dateStr} 00:00:00`, TIME_ZONE);
+  const backToZoned = utcToZonedTime(utc, TIME_ZONE);
+  return backToZoned.getDay();
+}
+
+// --- RANGOS DE HORARIO ---
 function normalizeDayValueToRanges(val) {
   if (val == null) return [];
   if (typeof val === 'string') {
@@ -74,26 +90,29 @@ function intersectRangesArrays(rangesA, rangesB) {
   return out;
 }
 
+// Genera slots como Date(UTC) a partir de rangos locales y paso en minutos
 function buildSlotsFromRanges(dateStr, ranges, stepMinutes) {
   const slots = [];
   for (const range of ranges) {
     const [openTime, closeTime] = range.split('-').map(s => s.trim());
     if (!openTime || !closeTime) continue;
-    let current = makeLocalDate(dateStr, openTime);
-    const closeDateTime = makeLocalDate(dateStr, closeTime);
+
+    let current = makeLocalUtc(dateStr, openTime);
+    const closeDateTime = makeLocalUtc(dateStr, closeTime);
+
     while (current < closeDateTime) {
-      const potentialSlotEnd = new Date(current.getTime() + stepMinutes * 60000);
-      if (potentialSlotEnd <= closeDateTime) {
-        slots.push(new Date(current));
+      const potentialEnd = new Date(current.getTime() + stepMinutes * 60000);
+      if (potentialEnd <= closeDateTime) {
+        slots.push(new Date(current)); // UTC
       }
-      current.setMinutes(current.getMinutes() + stepMinutes);
+      current = new Date(current.getTime() + stepMinutes * 60000);
     }
   }
   return slots;
 }
 
 function getDayRangesFromWorkingHours(workingHours, dateStr) {
-  const jsDow = new Date(`${dateStr}T00:00:00`).getDay();
+  const jsDow = getLocalJsDow(dateStr); // ← Bogotá
   const spaKey = DAY_KEYS_SPA[jsDow];
   const engKey = DAY_KEYS_ENG[jsDow];
 
@@ -129,16 +148,14 @@ function getDayRangesFromWorkingHours(workingHours, dateStr) {
 
 // ✅ Helper nuevo: obtiene los rangos efectivos del estilista (heredando si corresponde)
 function getEffectiveStylistDayRanges(stylistWH, tenantWH, dateStr) {
-  // Hereda: si el horario del estilista es null -> usa el del tenant
   if (stylistWH === null) {
     return getDayRangesFromWorkingHours(tenantWH, dateStr);
   }
-  // Tiene horario propio (objeto) -> usa su día
   return getDayRangesFromWorkingHours(stylistWH || {}, dateStr);
 }
 
 // -------------------------------
-// CONTROLADOR
+// CONTROLADORES
 // -------------------------------
 
 exports.createAppointment = async (req, res) => {
@@ -152,7 +169,7 @@ exports.createAppointment = async (req, res) => {
   }
 
   try {
-    // Valida que el estilista haga ese servicio
+    // Valida skill
     const skillCheck = await db.query(
       'SELECT 1 FROM stylist_services WHERE user_id = $1 AND service_id = $2',
       [stylist_id, service_id]
@@ -162,10 +179,15 @@ exports.createAppointment = async (req, res) => {
     }
 
     const duration = await getServiceDurationMinutes(service_id, 60);
+
+    // start_time debe venir ISO con zona (o UTC). Lo respetamos tal cual:
     const startTimeDate = new Date(start_time);
+    if (isNaN(startTimeDate)) {
+      return res.status(400).json({ error: 'start_time inválido. Envíe ISO 8601 con zona o UTC.' });
+    }
     const endTimeDate = new Date(startTimeDate.getTime() + duration * 60000);
 
-    // Chequeo de solapamiento con otras citas bloqueantes
+    // Chequeo solapamiento
     const overlap = await db.query(
       `SELECT id FROM appointments
        WHERE stylist_id = $1
@@ -237,6 +259,7 @@ exports.createAppointmentsBatch = async (req, res) => {
 
       const duration = await getServiceDurationMinutes(service_id, 60);
       const startTimeDate = new Date(start_time);
+      if (isNaN(startTimeDate)) throw new Error('start_time inválido en una de las citas.');
       const endTimeDate = new Date(startTimeDate.getTime() + duration * 60000);
 
       const overlap = await db.query(
@@ -294,6 +317,7 @@ exports.updateAppointment = async (req, res) => {
     const newStylistId = stylist_id ?? current.stylist_id;
     const newServiceId = service_id ?? current.service_id;
     const newStart = start_time ? new Date(start_time) : new Date(current.start_time);
+    if (isNaN(newStart)) return res.status(400).json({ error: 'start_time inválido.' });
 
     if (newStylistId !== current.stylist_id || newServiceId !== current.service_id) {
       const skillCheck = await db.query(
@@ -411,7 +435,7 @@ exports.getAvailability = async (req, res) => {
     }
     const stylistWorkingHours = stylistResult.rows[0].working_hours ?? null;
 
-    // ✅ Cambiado: hereda si es null
+    // Herencia
     const stylistDayRanges = getEffectiveStylistDayRanges(
       stylistWorkingHours,
       tenantWorkingHours,
@@ -421,13 +445,13 @@ exports.getAvailability = async (req, res) => {
       return res.status(200).json({ availableSlots: [], message: 'El estilista no trabaja en esta fecha.' });
     }
 
-    // Intersección efectiva (si hereda, intersection con tenant = tenant)
+    // Intersección efectiva
     const effectiveDayRanges = intersectRangesArrays(tenantDayRanges, stylistDayRanges);
     if (effectiveDayRanges.length === 0) {
       return res.status(200).json({ availableSlots: [], message: 'La hora laboral del estilista no coincide con la del salón.' });
     }
 
-    // Citas existentes del día (bloqueantes)
+    // Citas existentes bloqueantes (día)
     const appointmentsResult = await db.query(
       `SELECT start_time, end_time
        FROM appointments
@@ -438,7 +462,7 @@ exports.getAvailability = async (req, res) => {
     );
     const existingAppointments = appointmentsResult.rows;
 
-    // Construcción de slots
+    // Construcción de slots (UTC)
     const allSlots = buildSlotsFromRanges(date, effectiveDayRanges, serviceDuration);
     const availableSlots = allSlots.filter((slot) => {
       const slotEnd = new Date(slot.getTime() + serviceDuration * 60000);
@@ -464,7 +488,8 @@ exports.getAvailableStylistsByTime = async (req, res) => {
     return res.status(400).json({ error: 'Faltan parámetros obligatorios: service_id, date, time.' });
   }
 
-  const requestedStartDateTime = makeLocalDate(date, time);
+  // ✅ Ajuste clave: construir la hora solicitada como LOCAL (Bogotá) -> UTC
+  const requestedStartDateTime = makeLocalUtc(date, time);
 
   try {
     const serviceDuration = await getServiceDurationMinutes(service_id, 60);
@@ -478,12 +503,12 @@ exports.getAvailableStylistsByTime = async (req, res) => {
     const tenantWorkingHours = tenantResult.rows[0].working_hours || {};
     const tenantDayRanges = getDayRangesFromWorkingHours(tenantWorkingHours, date);
 
-    // Verifica que el tenant esté abierto
+    // Verifica que el tenant esté abierto (comparando en UTC, pero construyendo desde local)
     let isTenantOpenAtRequestedTime = false;
     for (const range of tenantDayRanges) {
       const [openTime, closeTime] = range.split('-').map(s => s.trim());
-      const tenantOpenDateTime = makeLocalDate(date, openTime);
-      const tenantCloseDateTime = makeLocalDate(date, closeTime);
+      const tenantOpenDateTime = makeLocalUtc(date, openTime);
+      const tenantCloseDateTime = makeLocalUtc(date, closeTime);
       if (requestedStartDateTime >= tenantOpenDateTime && requestedEndDateTime <= tenantCloseDateTime) {
         isTenantOpenAtRequestedTime = true;
         break;
@@ -493,7 +518,7 @@ exports.getAvailableStylistsByTime = async (req, res) => {
       return res.status(200).json({ availableStylists: [], message: 'El salón no está abierto para este servicio en la hora solicitada.' });
     }
 
-    // Estilistas que saben hacer el servicio (con sus WH)
+    // Estilistas que saben hacer el servicio
     const stylistsResult = await db.query(
       `SELECT u.id, u.first_name, u.last_name, u.working_hours, ss.last_completed_at
        FROM users u
@@ -508,7 +533,6 @@ exports.getAvailableStylistsByTime = async (req, res) => {
     for (const stylist of allPotentialStylists) {
       const stylistWorkingHours = stylist.working_hours ?? null;
 
-      // ✅ Cambiado: hereda si es null
       const stylistDayRanges = getEffectiveStylistDayRanges(
         stylistWorkingHours,
         tenantWorkingHours,
@@ -523,8 +547,8 @@ exports.getAvailableStylistsByTime = async (req, res) => {
       let fitsWorkingRange = false;
       for (const r of effectiveRanges) {
         const [o, c] = r.split('-').map(s => s.trim());
-        const openDT = makeLocalDate(date, o);
-        const closeDT = makeLocalDate(date, c);
+        const openDT = makeLocalUtc(date, o);
+        const closeDT = makeLocalUtc(date, c);
         if (requestedStartDateTime >= openDT && requestedEndDateTime <= closeDT) {
           fitsWorkingRange = true;
           break;
@@ -567,7 +591,8 @@ exports.validateAppointment = async (req, res) => {
 
   try {
     const duration = await getServiceDurationMinutes(service_id, 60);
-    const start = makeLocalDate(date, time);
+    // ✅ Local (Bogotá) → UTC
+    const start = makeLocalUtc(date, time);
     const end = new Date(start.getTime() + duration * 60000);
 
     // Tenant WH
@@ -580,7 +605,7 @@ exports.validateAppointment = async (req, res) => {
 
     const tenantOk = tenantRanges.some(r => {
       const [o, c] = r.split('-').map(s => s.trim());
-      return start >= makeLocalDate(date, o) && end <= makeLocalDate(date, c);
+      return start >= makeLocalUtc(date, o) && end <= makeLocalUtc(date, c);
     });
     if (!tenantOk) {
       return res.status(200).json({ valid: false, reason: 'El salón no está abierto a esa hora.' });
@@ -596,7 +621,6 @@ exports.validateAppointment = async (req, res) => {
     }
     const sWH = stylistRes.rows[0].working_hours ?? null;
 
-    // ✅ Cambiado: hereda si es null
     const stylistRanges = getEffectiveStylistDayRanges(
       sWH,
       tenantWorkingHours,
@@ -606,7 +630,7 @@ exports.validateAppointment = async (req, res) => {
     const effective = intersectRangesArrays(tenantRanges, stylistRanges);
     const stylistOk = effective.some(r => {
       const [o, c] = r.split('-').map(s => s.trim());
-      return start >= makeLocalDate(date, o) && end <= makeLocalDate(date, c);
+      return start >= makeLocalUtc(date, o) && end <= makeLocalUtc(date, c);
     });
     if (!stylistOk) {
       return res.status(200).json({ valid: false, reason: 'El estilista no trabaja a esa hora.' });

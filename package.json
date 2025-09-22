@@ -1,18 +1,25 @@
 {
   "name": "tpnewia",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "",
+  "private": true,
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=16.20.0 <21"
+  },
   "scripts": {
     "start": "node src/index.js",
+    "start:prod": "NODE_ENV=production node src/index.js",
     "dev": "nodemon src/index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
+    "date-fns": "^2.30.0",
+    "date-fns-tz": "^2.0.0",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
@@ -22,5 +29,9 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
+  },
+  "overrides": {
+    "date-fns": "^2.30.0",
+    "date-fns-tz": "^2.0.0"
   }
 }
