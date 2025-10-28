@@ -1,21 +1,31 @@
-// Contenido COMPLETO y FINAL para: src/routes/serviceRoutes.js
-
+// src/routes/serviceRoutes.js
 const express = require('express');
 const router = express.Router();
 const serviceController = require('../controllers/serviceController');
-const authMiddleware = require('../middleware/authMiddleware'); // <-- 1. IMPORTAMOS EL MIDDLEWARE
+const authMiddleware = require('../middleware/authMiddleware');
 
-// --- Rutas Generales (Protegidas) ---
-router.post('/', authMiddleware, serviceController.createService);
-router.get('/tenant/:tenantId', authMiddleware, serviceController.getServicesByTenant);
+// ---------------------------------------------------
+// Rutas PÚBLICAS (sin autenticación) - van PRIMERO
+// ---------------------------------------------------
+router.get('/search/:tenantId', serviceController.searchServices);
 
-// --- Nueva Ruta Específica (Debe ir antes de /:id para no generar conflictos) ---
-// GET /api/services/:id/stylists - Obtener estilistas que pueden hacer este servicio
-router.get('/:id/stylists', authMiddleware, serviceController.getStylistsForService); // <-- 2. AÑADIMOS LA NUEVA RUTA
+// ---------------------------------------------------
+// A partir de aquí, TODO requiere auth
+// ---------------------------------------------------
+router.use(authMiddleware);
 
-// --- Rutas que operan sobre un servicio específico (Protegidas) ---
-router.get('/:id', authMiddleware, serviceController.getServiceById);
-router.put('/:id', authMiddleware, serviceController.updateService);
-router.delete('/:id', authMiddleware, serviceController.deleteService);
+// Crear servicio
+router.post('/', serviceController.createService);
+
+// Listar servicios del tenant (el :tenantId en la ruta se ignora; el controller usa tenant_id del token)
+router.get('/tenant/:tenantId', serviceController.getServicesByTenant);
+
+// Estilistas cualificados para un servicio
+router.get('/:id/stylists', serviceController.getStylistsForService);
+
+// Operaciones por ID
+router.get('/:id', serviceController.getServiceById);
+router.put('/:id', serviceController.updateService);
+router.delete('/:id', serviceController.deleteService);
 
 module.exports = router;

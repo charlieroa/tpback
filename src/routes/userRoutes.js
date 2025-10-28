@@ -1,55 +1,64 @@
-// Contenido COMPLETO y CORREGIDO para: src/routes/userRoutes.js
-
+// src/routes/userRoutes.js
 const express = require('express');
 const router = express.Router();
 
 const userController = require('../controllers/userController');
 const authMiddleware = require('../middleware/authMiddleware');
 
-// =========================================================
-// Rutas ESPECÍFICAS (van primero para evitar colisiones)
-// =========================================================
+/* =========================================================
+   RUTAS PÚBLICAS (deben ir PRIMERO)
+   IMPORTANTE: poner antes de cualquier "/:id" o similares
+========================================================= */
 
-// ----> RUTA NUEVA AÑADIDA AQUÍ <----
-// GET /api/users/tenant/:tenantId/clients - Para la lista del CRM
+// ✅ Búsqueda pública de estilistas
+// GET /api/users/:tenantId/stylists/search?query=carlos
+router.get('/tenant/:tenantId/stylists/search', userController.searchStylists);
+
+// WhatsApp público
+router.get('/whatsapp/client/:phoneNumber', userController.getClientByPhonePublic);
+router.post('/whatsapp/register', userController.registerClientFromWhatsApp);
+
+/* =========================================================
+   RUTAS ESPECÍFICAS (con auth cuando aplique)
+========================================================= */
+
+// Lista de clientes del tenant (para CRM)
 router.get('/tenant/:tenantId/clients', authMiddleware, userController.getTenantClientsWithRecentServices);
 
-// GET /api/users/by-phone/:phoneNumber - Para que el bot identifique clientes
+// Buscar usuario por teléfono (mismo tenant)
 router.get('/by-phone/:phoneNumber', authMiddleware, userController.getUserByPhone);
 
-// GET /api/users/stylists/next - Siguiente estilista disponible (turnero + horario)
+// Siguiente estilista disponible
 router.get('/stylists/next', authMiddleware, userController.getNextAvailableStylist);
 
-// =========================================================
-/** CRUD de Usuarios */
-// =========================================================
+/* =========================================================
+   CRUD DE USUARIOS
+========================================================= */
 
-// POST /api/users - Crear un nuevo usuario (público para clientes, o por un admin)
+// Crear usuario (público)
 router.post('/', userController.createUser);
 
-// GET /api/users/tenant/:tenantId - Obtener todos los usuarios de un tenant (filtro opcional ?role_id=3)
+// Obtener todos los usuarios por tenant (opcional ?role_id=3)
 router.get('/tenant/:tenantId', authMiddleware, userController.getAllUsersByTenant);
 
-// =========================================================
-/** Operaciones sobre un usuario específico (deben ir al final) */
-// =========================================================
+/* =========================================================
+   OPERACIONES SOBRE UN USUARIO ESPECÍFICO (al final)
+========================================================= */
 
-// GET /api/users/:id - Obtener un usuario por su ID
+// Obtener por ID
 router.get('/:id', authMiddleware, userController.getUserById);
 
-// PUT /api/users/:id - Actualizar un usuario por su ID (incluye working_hours si lo envías)
+// Actualizar por ID
 router.put('/:id', authMiddleware, userController.updateUser);
 
-// DELETE /api/users/:id - Eliminar un usuario por su ID
+// Eliminar por ID
 router.delete('/:id', authMiddleware, userController.deleteUser);
 
-// =========================================================
-/** Working Hours individuales del usuario (horario propio del estilista) */
-// =========================================================
-// GET /api/users/:id/working-hours - Traer el JSON de horario del usuario (o null si hereda del tenant)
-router.get('/:id/working-hours', authMiddleware, userController.getUserWorkingHours);
+/* =========================================================
+   WORKING HOURS del usuario
+========================================================= */
 
-// PUT /api/users/:id/working-hours - Actualizar el JSON de horario del usuario (enviar { week: {...} } o null)
+router.get('/:id/working-hours', authMiddleware, userController.getUserWorkingHours);
 router.put('/:id/working-hours', authMiddleware, userController.updateUserWorkingHours);
 
 module.exports = router;

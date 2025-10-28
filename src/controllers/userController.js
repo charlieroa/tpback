@@ -40,11 +40,70 @@ const minutesFromHHMM = (hhmm) => {
   return h * 60 + m;
 };
 
+// Limpieza de texto para búsquedas públicas (trim + colapso espacios)
+const normalizeSearchQuery = (value) =>
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/* ===========================================
+   Resolver tenant desde número receptor (WA)
+=========================================== */
+async function resolveTenantIdFromPhone(req) {
+  let tenantId = req.body?.tenant_id || req.user?.tenant_id || null;
+
+  const phoneNumberId =
+    req.header('X-WA-Phone-Id') ||
+    req.body?.phoneNumberId ||
+    req.query?.phone_number_id ||
+    null;
+
+  if (!tenantId && !phoneNumberId) {
+    return { tenantId: null, phoneNumberId: null, mappingTenantId: null };
+  }
+
+  let mappingTenantId = null;
+  if (phoneNumberId) {
+    const t = await db.query(
+      `SELECT tenant_id FROM tenant_numbers WHERE phone_number_id = $1 LIMIT 1`,
+      [phoneNumberId]
+    );
+    mappingTenantId = t.rows[0]?.tenant_id || null;
+  }
+
+  if (!mappingTenantId && tenantId && phoneNumberId) {
+    await db.query(
+      `
+      INSERT INTO tenant_numbers (tenant_id, phone_number_id, provider, updated_at)
+      VALUES ($1, $2, 'whatsapp', NOW())
+      ON CONFLICT (phone_number_id) DO UPDATE
+      SET tenant_id = EXCLUDED.tenant_id,
+          provider  = EXCLUDED.provider,
+          updated_at = NOW()
+      `,
+      [tenantId, phoneNumberId]
+    );
+    mappingTenantId = tenantId;
+  }
+
+  if (!tenantId && mappingTenantId) {
+    tenantId = mappingTenantId;
+  }
+
+  if (tenantId && mappingTenantId && tenantId !== mappingTenantId) {
+    const err = new Error('tenant_id no coincide con el phone_number_id');
+    err.status = 409;
+    throw err;
+  }
+
+  return { tenantId, phoneNumberId, mappingTenantId };
+}
+
 /* ===========================================
    Validación: horario de estilista dentro del tenant
 =========================================== */
 const validateStylistWorkingHoursAgainstTenant = async (tenantId, stylistHours) => {
-  if (!stylistHours) return; // hereda o sin horario
+  if (!stylistHours) return;
 
   const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantId]);
   const tenantWorkingHours = tenantResult.rows[0]?.working_hours;
@@ -80,6 +139,73 @@ const validateStylistWorkingHoursAgainstTenant = async (tenantId, stylistHours) 
 };
 
 /* =========================================================
+   NUEVO: BUSCAR ESTILISTAS POR NOMBRE (Para AI Agent)
+   - Limpia query (trim / espacios)
+   - Matchea first_name, last_name y full name
+   - Prioriza exactos > empieza con > contiene
+========================================================= */
+
+// controllers/userController.js (solo este handler)
+// controllers/userController.js
+exports.searchStylists = async (req, res) => {
+  const { tenantId } = req.params;
+  let { query } = req.query;
+
+  if (!tenantId) return res.status(400).json({ error: 'Falta tenantId' });
+  if (!query)   return res.status(400).json({ error: 'Falta el parámetro de búsqueda (query)' });
+
+  query = String(query).replace(/\s+/g, ' ').trim();
+  if (query.length < 2) return res.status(200).json({ message: 'Query muy corto', stylists: [] });
+
+  const like = `%${query}%`;
+  const starts = `${query}%`;
+  const exact = query.toLowerCase();
+
+  try {
+    const sql = `
+      WITH base AS (
+        SELECT
+          id,
+          first_name,
+          last_name,
+          LOWER(first_name)                                        AS lf,
+          LOWER(COALESCE(last_name, ''))                           AS ll,
+          LOWER(TRIM(first_name || ' ' || COALESCE(last_name,''))) AS lfull
+        FROM users
+        WHERE tenant_id=$1 AND role_id=3
+          AND COALESCE(NULLIF(status,''),'active')='active'
+      )
+      SELECT id, first_name, last_name
+      FROM base
+      WHERE lf LIKE LOWER($2) OR ll LIKE LOWER($2) OR lfull LIKE LOWER($2)
+      ORDER BY
+        CASE
+          WHEN lf=$3 OR ll=$3 OR lfull=$3 THEN 0
+          WHEN lf LIKE LOWER($4) OR ll LIKE LOWER($4) OR lfull LIKE LOWER($4) THEN 1
+          ELSE 2
+        END, first_name ASC, last_name ASC
+      LIMIT 10
+    `;
+    const params = [tenantId, like, exact, starts];
+    const result = await db.query(sql, params);
+
+    return res.status(200).json({
+      stylists: result.rows.map(s => ({
+        id: s.id,
+        name: `${s.first_name} ${s.last_name || ''}`.trim(),
+        first_name: s.first_name,
+        last_name: s.last_name
+      }))
+    });
+  } catch (error) {
+    console.error('Error al buscar estilistas:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+
+
+/* =========================================================
    Crear un nuevo Usuario
 ========================================================= */
 exports.createUser = async (req, res) => {
@@ -90,20 +216,20 @@ exports.createUser = async (req, res) => {
     working_hours,
   } = req.body;
 
-  // fallback por si lo creas desde sesión autenticada
-  const tenant_id = tenantIdFromBody || req.user?.tenant_id;
-
-  const isStylist = parseInt(role_id, 10) === 3;
-  const isClient  = parseInt(role_id, 10) === 4;
-
-  if (!tenant_id || !role_id || !first_name || !email || !password) {
-    return res.status(400).json({ error: 'Faltan campos obligatorios.' });
-  }
-  if (isStylist && !tenant_id) {
-    return res.status(400).json({ error: 'Faltan campos obligatorios para crear un estilista.' });
-  }
-
   try {
+    const { tenantId } = await resolveTenantIdFromPhone(req);
+    const tenant_id = tenantId || tenantIdFromBody || req.user?.tenant_id;
+
+    const isStylist = parseInt(role_id, 10) === 3;
+    const isClient  = parseInt(role_id, 10) === 4;
+
+    if (!tenant_id || !role_id || !first_name || !email || !password) {
+      return res.status(400).json({ error: 'Faltan campos obligatorios.' });
+    }
+    if (isStylist && !tenant_id) {
+      return res.status(400).json({ error: 'Faltan campos obligatorios para crear un estilista.' });
+    }
+
     const salt = await bcrypt.genSalt(10);
     const passwordHashed = await bcrypt.hash(password, salt);
 
@@ -131,7 +257,7 @@ exports.createUser = async (req, res) => {
         first_name,
         last_name || null,
         email,
-        passwordHashed,            // <- columna 'password' en tu esquema
+        passwordHashed,
         phone || null,
         payment_type || null,
         payment_type === 'salary' ? (base_salary ?? 0) : 0,
@@ -140,7 +266,6 @@ exports.createUser = async (req, res) => {
       ]
     );
     
-    // Si es cliente, devolvemos el formato que espera el CRM
     if (isClient) {
       const newUserFromDb = dbToApiUser(result.rows[0]);
       const clientResponse = {
@@ -150,7 +275,8 @@ exports.createUser = async (req, res) => {
         phone: newUserFromDb.phone,
         img: null,
         tags: [],
-        cantidadServicios: 0
+        cantidadServicios: 0,
+        tenant_id: newUserFromDb.tenant_id,
       };
       return res.status(201).json(clientResponse);
     } else {
@@ -159,6 +285,9 @@ exports.createUser = async (req, res) => {
 
   } catch (error) {
     console.error('Error al crear usuario:', error);
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message });
+    }
     if (error.code === '23505') {
       return res.status(409).json({ error: 'El correo electrónico ya está registrado.' });
     }
@@ -218,13 +347,13 @@ exports.getUserById = async (req, res) => {
 };
 
 /* =========================================================
-   Actualizar un Usuario (VERSIÓN CORREGIDA CON SQL)
+   Actualizar un Usuario
 ========================================================= */
+// controllers/userController.js (solo el handler updateUser corregido)
 exports.updateUser = async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
 
-  // Campos que el usuario puede actualizar
   const allowedUpdates = [
     'first_name', 'last_name', 'email', 'phone', 'password',
     'payment_type', 'base_salary', 'commission_rate', 'status', 'working_hours'
@@ -243,18 +372,18 @@ exports.updateUser = async (req, res) => {
     const isStylist = parseInt(role_id, 10) === 3;
     const isClient  = parseInt(role_id, 10) === 4;
 
-    // Manejo especial para la contraseña
+    // password -> password_hash
     if (updates.password) {
       if (updates.password.length < 6) {
         return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres." });
       }
       const salt = await bcrypt.genSalt(10);
       const passwordHashed = await bcrypt.hash(updates.password, salt);
-      updateFields.push(`password = $${paramIndex++}`); // <- columna 'password'
+      updateFields.push(`password_hash = $${paramIndex++}`);
       values.push(passwordHashed);
     }
 
-    // Manejo especial para working_hours
+    // working_hours (normaliza + valida contra tenant si es estilista)
     if (updates.working_hours !== undefined) {
       const wh = updates.working_hours === null ? null : normalizeWorkingHours(updates.working_hours);
       if (isStylist && wh) {
@@ -264,7 +393,7 @@ exports.updateUser = async (req, res) => {
       values.push(wh);
     }
 
-    // Construir el resto de la consulta dinámicamente
+    // resto de campos permitidos
     for (const key of allowedUpdates) {
       if (key in updates && key !== 'password' && key !== 'working_hours') {
         updateFields.push(`${key} = $${paramIndex++}`);
@@ -272,8 +401,8 @@ exports.updateUser = async (req, res) => {
       }
     }
 
+    // Si no hay cambios, devuelve el usuario actual formateado
     if (updateFields.length === 0) {
-      // Si no hay nada que actualizar, devolvemos el usuario actual en el formato correcto
       const currentUser = await db.query('SELECT * FROM users WHERE id = $1', [id]);
       if (isClient) {
         const dbUser = dbToApiUser(currentUser.rows[0]);
@@ -288,7 +417,7 @@ exports.updateUser = async (req, res) => {
       }
     }
 
-    values.push(id); // El último parámetro es el ID para el WHERE
+    values.push(id);
 
     const queryText = `
       UPDATE users 
@@ -303,7 +432,6 @@ exports.updateUser = async (req, res) => {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
     
-    // Devolvemos en el formato correcto según el rol
     if (isClient) {
       const updatedDbUser = dbToApiUser(result.rows[0]);
       res.status(200).json({
@@ -318,7 +446,7 @@ exports.updateUser = async (req, res) => {
 
   } catch (error) {
     console.error("Error al actualizar usuario:", error);
-    if (error.code === '23505') { // Error de constraint (ej: email duplicado)
+    if (error.code === '23505') {
       return res.status(409).json({ error: 'El correo electrónico ya está en uso.' });
     }
     res.status(500).json({ error: error.message || "Error interno del servidor" });
@@ -461,7 +589,7 @@ exports.getNextAvailableStylist = async (req, res) => {
 };
 
 /* =========================================================
-   Buscar usuario por teléfono (mismo tenant)
+   Buscar usuario por teléfono (mismo tenant) - REQUIERE AUTH
 ========================================================= */
 exports.getUserByPhone = async (req, res) => {
   const { phoneNumber } = req.params;
@@ -490,11 +618,11 @@ exports.getUserByPhone = async (req, res) => {
 };
 
 /* ==================================================================
-   NUEVA FUNCIÓN PARA EL CRM
+   OBTENER CLIENTES CON SERVICIOS RECIENTES (PARA CRM)
 ================================================================== */
 exports.getTenantClientsWithRecentServices = async (req, res) => {
   const { tenantId } = req.params;
-  const role_id_cliente = 4; // El rol de cliente es 4
+  const role_id_cliente = 4;
 
   if (!tenantId) {
     return res.status(400).json({ error: 'El ID del tenant es obligatorio.' });
@@ -547,6 +675,130 @@ exports.getTenantClientsWithRecentServices = async (req, res) => {
     return res.status(200).json(clients);
   } catch (error) {
     console.error('Error al obtener clientes con servicios recientes:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+/* ==================================================================
+   ENDPOINTS PÚBLICOS PARA WHATSAPP (SIN AUTENTICACIÓN)
+================================================================== */
+exports.getClientByPhonePublic = async (req, res) => {
+  const { phoneNumber } = req.params;
+
+  if (!phoneNumber) {
+    return res.status(400).json({ error: 'Número de teléfono no proporcionado.' });
+  }
+
+  try {
+    const { tenantId, mappingTenantId } = await resolveTenantIdFromPhone(req);
+    const resolvedTenant = tenantId || mappingTenantId || null;
+
+    let query = 'SELECT * FROM users WHERE phone = $1 AND role_id = 4';
+    const params = [phoneNumber];
+
+    if (resolvedTenant) {
+      query += ' AND tenant_id = $2';
+      params.push(resolvedTenant);
+    }
+
+    const result = await db.query(query, params);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ 
+        message: 'Cliente no encontrado con ese número de teléfono.' 
+      });
+    }
+
+    const user = dbToApiUser(result.rows[0]);
+    
+    return res.status(200).json({
+      id: user.id,
+      tenant_id: user.tenant_id,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      email: user.email,
+      phone: user.phone
+    });
+
+  } catch (error) {
+    console.error('Error al buscar cliente por teléfono (público):', error);
+    const status = error.status || 500;
+    return res.status(status).json({ error: error.message || 'Error interno del servidor' });
+  }
+};
+
+exports.registerClientFromWhatsApp = async (req, res) => {
+  const {
+    tenant_id: tenantIdFromBody,
+    first_name,
+    last_name,
+    phone,
+    email
+  } = req.body;
+
+  try {
+    const { tenantId } = await resolveTenantIdFromPhone(req);
+    const tenant_id = tenantId || tenantIdFromBody;
+
+    if (!tenant_id || !first_name || !phone) {
+      return res.status(400).json({ 
+        error: 'Faltan campos obligatorios: tenant_id (o phoneNumberId/X-WA-Phone-Id), first_name, phone' 
+      });
+    }
+
+    const clientEmail = email || `${phone}@whatsapp.temp`;
+
+    const existingClient = await db.query(
+      'SELECT id FROM users WHERE (phone = $1 OR email = $2) AND tenant_id = $3',
+      [phone, clientEmail, tenant_id]
+    );
+
+    if (existingClient.rows.length > 0) {
+      return res.status(409).json({ 
+        error: 'Cliente ya existe con ese teléfono o email',
+        client_id: existingClient.rows[0].id
+      });
+    }
+
+    const defaultPassword = 'whatsapp123';
+    const salt = await bcrypt.genSalt(10);
+    const passwordHashed = await bcrypt.hash(defaultPassword, salt);
+
+    const result = await db.query(
+      `INSERT INTO users (
+         tenant_id, role_id, first_name, last_name, email, password_hash, phone
+       ) VALUES ($1, 4, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [
+        tenant_id,
+        first_name,
+        last_name || '',
+        clientEmail,
+        passwordHashed,
+        phone
+      ]
+    );
+
+    const newClient = dbToApiUser(result.rows[0]);
+
+    return res.status(201).json({
+      id: newClient.id,
+      name: `${newClient.first_name} ${newClient.last_name || ''}`.trim(),
+      email: newClient.email,
+      phone: newClient.phone,
+      tenant_id: newClient.tenant_id
+    });
+
+  } catch (error) {
+    console.error('Error al registrar cliente desde WhatsApp:', error);
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    if (error.code === '23505') {
+      return res.status(409).json({ 
+        error: 'El correo electrónico o teléfono ya está registrado.' 
+      });
+    }
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };

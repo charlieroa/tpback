@@ -1,5 +1,5 @@
 // =========================================================
-// File: src/controllers/serviceController.js (Final con % comisión)
+// File: src/controllers/serviceController.js (Con búsqueda para AI Agent)
 // =========================================================
 const db = require('../config/db');
 
@@ -14,6 +14,52 @@ function parsePercentOrNull(input, fieldName = 'commission_percent') {
   }
   return Math.round(n * 100) / 100;
 }
+
+// =========================================================
+// NUEVO: BUSCAR SERVICIOS POR NOMBRE (Para AI Agent - Público)
+// =========================================================
+exports.searchServices = async (req, res) => {
+  const { tenantId } = req.params;
+  const { query } = req.query;
+
+  if (!query) {
+    return res.status(400).json({ error: 'Falta el parámetro de búsqueda (query)' });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT id, name, duration_minutes, price, description, category_id, commission_percent
+       FROM services
+       WHERE tenant_id = $1 
+         AND LOWER(name) LIKE LOWER($2)
+       ORDER BY name
+       LIMIT 10`,
+      [tenantId, `%${query}%`]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ 
+        message: `No se encontraron servicios que coincidan con "${query}"`,
+        services: []
+      });
+    }
+
+    return res.status(200).json({
+      services: result.rows.map(s => ({
+        id: s.id,
+        name: s.name,
+        duration_minutes: s.duration_minutes,
+        price: s.price,
+        description: s.description,
+        category_id: s.category_id,
+        commission_percent: s.commission_percent
+      }))
+    });
+  } catch (error) {
+    console.error('Error al buscar servicios:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
 
 // Crear un nuevo Servicio
 exports.createService = async (req, res) => {
@@ -176,7 +222,6 @@ exports.deleteService = async (req, res) => {
   }
 };
 
-// --- NUEVA FUNCIÓN ---
 // Lista estilistas cualificados para un servicio (acotado al tenant del token)
 exports.getStylistsForService = async (req, res) => {
   const { id } = req.params; // service_id
