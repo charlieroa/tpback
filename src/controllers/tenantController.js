@@ -1,9 +1,13 @@
+// src/controllers/tenantController.js
+'use strict';
+
 const db = require('../config/db');
 const slugify = require('slugify');
 
 // --- Helpers ---
+const createSlug = (text = '') =>
+  slugify(text, { lower: true, strict: true, remove: /[*+~.()'"!:@]/g });
 
-const createSlug = (text = '') => slugify(text, { lower: true, strict: true, remove: /[*+~.()'"!:@]/g });
 const clean = (v) => (v === undefined || v === null ? null : v);
 const fracToPct = (v) => (v === null || v === undefined ? null : Number(v) * 100);
 const pctToFrac = (v) => {
@@ -15,7 +19,7 @@ const safeParseJSON = (s) => {
   try { return JSON.parse(s); } catch { return null; }
 };
 
-// Mapea la fila de la BD al objeto que espera la API del frontend
+// Mapea la fila de la BD al objeto que espera el frontend
 const dbToApiTenant = (row) => ({
   id: row.id,
   name: row.name,
@@ -27,17 +31,20 @@ const dbToApiTenant = (row) => ({
   iva_rate: fracToPct(row.tax_rate),
   admin_fee_percent: fracToPct(row.admin_fee_rate),
   slug: row.slug,
-  working_hours: typeof row.working_hours === 'string' ? safeParseJSON(row.working_hours) : row.working_hours,
-  // --- Mapeo de los nuevos módulos activables ---
+  working_hours: typeof row.working_hours === 'string'
+    ? safeParseJSON(row.working_hours)
+    : row.working_hours,
+  // Módulos
   products_for_staff_enabled: row.products_for_staff_enabled,
   admin_fee_enabled: row.admin_fee_enabled,
   loans_to_staff_enabled: row.loans_to_staff_enabled,
-  // ---------------------------------------------
+  // ⬅️ NUEVO: flag para permitir citas en pasado
+  allow_past_appointments: !!row.allow_past_appointments,
   created_at: row.created_at,
   updated_at: row.updated_at,
 });
 
-// Construye la cláusula SET dinámicamente para las actualizaciones
+// Construye la cláusula SET dinámicamente para updates
 const buildUpdateSet = (payload) => {
   const fields = [];
   const values = [];
@@ -52,31 +59,41 @@ const buildUpdateSet = (payload) => {
 
 // --- Controlador ---
 
-// Crear un nuevo Tenant
+// Crear Tenant
 exports.createTenant = async (req, res) => {
   try {
     const {
-      name, address, phone, working_hours, email, website, logo_url, 
-      iva_rate, admin_fee_percent, products_for_staff_enabled = true, 
-      admin_fee_enabled = false, loans_to_staff_enabled = false
+      name, address, phone, working_hours, email, website, logo_url,
+      iva_rate, admin_fee_percent,
+      products_for_staff_enabled = true,
+      admin_fee_enabled = false,
+      loans_to_staff_enabled = false,
+      allow_past_appointments = false, // ⬅️ nuevo en create
     } = req.body;
 
     if (!name) return res.status(400).json({ error: 'El nombre es requerido' });
 
     const slug = createSlug(name);
+
     const result = await db.query(
       `INSERT INTO tenants (
-          name, address, phone, working_hours, slug, email, website, logo_url, 
-          tax_rate, admin_fee_rate, products_for_staff_enabled, admin_fee_enabled, loans_to_staff_enabled
+          name, address, phone, working_hours, slug, email, website, logo_url,
+          tax_rate, admin_fee_rate,
+          products_for_staff_enabled, admin_fee_enabled, loans_to_staff_enabled,
+          allow_past_appointments
        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+          $1, $2, $3, $4, $5, $6, $7, $8,
+          $9, $10,
+          $11, $12, $13,
+          $14
        ) RETURNING *`,
       [
-        clean(name), clean(address), clean(phone), 
+        clean(name), clean(address), clean(phone),
         working_hours ? JSON.stringify(working_hours) : null,
         slug, clean(email), clean(website), clean(logo_url),
         pctToFrac(iva_rate), pctToFrac(admin_fee_percent),
-        products_for_staff_enabled, admin_fee_enabled, loans_to_staff_enabled
+        !!products_for_staff_enabled, !!admin_fee_enabled, !!loans_to_staff_enabled,
+        !!allow_past_appointments,
       ]
     );
 
@@ -90,117 +107,126 @@ exports.createTenant = async (req, res) => {
   }
 };
 
-// Listar todos los Tenants
+// Listar Tenants
 exports.getAllTenants = async (req, res) => {
-    const { slug } = req.query;
-    try {
-        if (slug) {
-            const r = await db.query('SELECT * FROM tenants WHERE slug = $1', [slug]);
-            if (r.rows.length === 0) return res.status(404).json({ message: 'Peluquería no encontrada con ese slug.' });
-            return res.status(200).json(dbToApiTenant(r.rows[0]));
-        }
-        const result = await db.query('SELECT * FROM tenants ORDER BY created_at DESC');
-        return res.status(200).json(result.rows.map(dbToApiTenant));
-    } catch (error) {
-        console.error('Error al obtener tenants:', error);
-        return res.status(500).json({ error: 'Error interno del servidor' });
+  const { slug } = req.query;
+  try {
+    if (slug) {
+      const r = await db.query('SELECT * FROM tenants WHERE slug = $1', [slug]);
+      if (r.rows.length === 0) return res.status(404).json({ message: 'Peluquería no encontrada con ese slug.' });
+      return res.status(200).json(dbToApiTenant(r.rows[0]));
     }
+    const result = await db.query('SELECT * FROM tenants ORDER BY created_at DESC');
+    return res.status(200).json(result.rows.map(dbToApiTenant));
+  } catch (error) {
+    console.error('Error al obtener tenants:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
 };
 
-// Obtener un Tenant por ID
+// Obtener Tenant por ID
 exports.getTenantById = async (req, res) => {
-    const { id } = req.params;
-    try {
-        const result = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
-        if (result.rows.length === 0) return res.status(404).json({ message: 'Tenant no encontrado' });
-        return res.status(200).json(dbToApiTenant(result.rows[0]));
-    } catch (error) {
-        console.error('Error al obtener tenant por ID:', error);
-        return res.status(500).json({ error: 'Error interno del servidor' });
-    }
+  const { id } = req.params;
+  try {
+    const result = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
+    if (result.rows.length === 0) return res.status(404).json({ message: 'Tenant no encontrado' });
+    return res.status(200).json(dbToApiTenant(result.rows[0]));
+  } catch (error) {
+    console.error('Error al obtener tenant por ID:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
 };
 
-// Actualizar (parcial) un Tenant
+// Actualizar (parcial) Tenant
 exports.updateTenant = async (req, res) => {
-    const { id } = req.params;
-    const body = req.body;
+  const { id } = req.params;
+  const body = req.body;
 
-    try {
-        const exists = await db.query('SELECT id FROM tenants WHERE id = $1', [id]);
-        if (exists.rowCount === 0) {
-            return res.status(404).json({ message: 'Tenant no encontrado para actualizar' });
-        }
-
-        const payload = {};
-
-        if (body.name !== undefined) {
-            payload.name = clean(body.name);
-            payload.slug = createSlug(body.name);
-        }
-        if (body.address !== undefined) payload.address = clean(body.address);
-        if (body.phone !== undefined) payload.phone = clean(body.phone);
-        if (body.email !== undefined) payload.email = clean(body.email);
-        if (body.website !== undefined) payload.website = clean(body.website);
-        if (body.logo_url !== undefined) payload.logo_url = clean(body.logo_url);
-        if (body.working_hours !== undefined) payload.working_hours = body.working_hours ? JSON.stringify(body.working_hours) : null;
-        if (body.iva_rate !== undefined) payload.tax_rate = pctToFrac(body.iva_rate);
-        
-        if (body.admin_fee_enabled === false) {
-             payload.admin_fee_rate = null;
-        } else if (body.admin_fee_percent !== undefined) {
-             payload.admin_fee_rate = pctToFrac(body.admin_fee_percent);
-        }
-        
-        if (body.products_for_staff_enabled !== undefined) payload.products_for_staff_enabled = body.products_for_staff_enabled;
-        if (body.admin_fee_enabled !== undefined) payload.admin_fee_enabled = body.admin_fee_enabled;
-        if (body.loans_to_staff_enabled !== undefined) payload.loans_to_staff_enabled = body.loans_to_staff_enabled;
-        
-        if (Object.keys(payload).length === 0) {
-            const current = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
-            return res.status(200).json(dbToApiTenant(current.rows[0]));
-        }
-
-        const { clause, values } = buildUpdateSet(payload);
-        const sql = `UPDATE tenants SET ${clause} WHERE id = $${values.length + 1} RETURNING *`;
-        const result = await db.query(sql, [...values, id]);
-
-        return res.status(200).json(dbToApiTenant(result.rows[0]));
-
-    } catch (error) {
-        console.error('Error al actualizar tenant:', error);
-        return res.status(500).json({ error: 'Error interno del servidor' });
+  try {
+    const exists = await db.query('SELECT id FROM tenants WHERE id = $1', [id]);
+    if (exists.rowCount === 0) {
+      return res.status(404).json({ message: 'Tenant no encontrado para actualizar' });
     }
+
+    const payload = {};
+
+    if (body.name !== undefined) {
+      payload.name = clean(body.name);
+      payload.slug = createSlug(body.name);
+    }
+    if (body.address !== undefined) payload.address = clean(body.address);
+    if (body.phone !== undefined) payload.phone = clean(body.phone);
+    if (body.email !== undefined) payload.email = clean(body.email);
+    if (body.website !== undefined) payload.website = clean(body.website);
+    if (body.logo_url !== undefined) payload.logo_url = clean(body.logo_url);
+    if (body.working_hours !== undefined) {
+      payload.working_hours = body.working_hours ? JSON.stringify(body.working_hours) : null;
+    }
+    if (body.iva_rate !== undefined) payload.tax_rate = pctToFrac(body.iva_rate);
+
+    // Si deshabilitan admin_fee, anulamos la tasa
+    if (body.admin_fee_enabled === false) {
+      payload.admin_fee_rate = null;
+    } else if (body.admin_fee_percent !== undefined) {
+      payload.admin_fee_rate = pctToFrac(body.admin_fee_percent);
+    }
+
+    if (body.products_for_staff_enabled !== undefined)
+      payload.products_for_staff_enabled = !!body.products_for_staff_enabled;
+    if (body.admin_fee_enabled !== undefined)
+      payload.admin_fee_enabled = !!body.admin_fee_enabled;
+    if (body.loans_to_staff_enabled !== undefined)
+      payload.loans_to_staff_enabled = !!body.loans_to_staff_enabled;
+
+    // ⬅️ NUEVO: actualizar flag de citas en pasado
+    if (body.allow_past_appointments !== undefined)
+      payload.allow_past_appointments = !!body.allow_past_appointments;
+
+    if (Object.keys(payload).length === 0) {
+      const current = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);
+      return res.status(200).json(dbToApiTenant(current.rows[0]));
+    }
+
+    const { clause, values } = buildUpdateSet(payload);
+    const sql = `UPDATE tenants SET ${clause} WHERE id = $${values.length + 1} RETURNING *`;
+    const result = await db.query(sql, [...values, id]);
+
+    return res.status(200).json(dbToApiTenant(result.rows[0]));
+  } catch (error) {
+    console.error('Error al actualizar tenant:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
 };
 
-// Endpoint para subir y actualizar el logo del tenant
+// Subida de logo
 exports.uploadTenantLogo = async (req, res) => {
-    const { tenantId } = req.params;
-    try {
-        if (!req.file) {
-            return res.status(400).json({ message: 'No se ha subido ningún archivo.' });
-        }
-        const uploadedFileUrl = `/uploads/logos/${req.file.filename}`;
-        const tenantExists = await db.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
-        if (tenantExists.rowCount === 0) {
-            return res.status(404).json({ message: 'Tenant no encontrado.' });
-        }
-        await db.query('UPDATE tenants SET logo_url = $1, updated_at = NOW() WHERE id = $2', [uploadedFileUrl, tenantId]);
-        return res.status(200).json({ url: uploadedFileUrl });
-    } catch (error) {
-        console.error('Error al subir el logo:', error);
-        return res.status(500).json({ error: 'Error interno del servidor.' });
+  const { tenantId } = req.params;
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No se ha subido ningún archivo.' });
     }
+    const uploadedFileUrl = `/uploads/logos/${req.file.filename}`;
+    const tenantExists = await db.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
+    if (tenantExists.rowCount === 0) {
+      return res.status(404).json({ message: 'Tenant no encontrado.' });
+    }
+    await db.query('UPDATE tenants SET logo_url = $1, updated_at = NOW() WHERE id = $2', [uploadedFileUrl, tenantId]);
+    return res.status(200).json({ url: uploadedFileUrl });
+  } catch (error) {
+    console.error('Error al subir el logo:', error);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
 };
 
-// Eliminar un Tenant
+// Eliminar Tenant
 exports.deleteTenant = async (req, res) => {
-    const { id } = req.params;
-    try {
-        const result = await db.query('DELETE FROM tenants WHERE id = $1 RETURNING *', [id]);
-        if (result.rowCount === 0) return res.status(404).json({ message: 'Tenant no encontrado para eliminar' });
-        return res.status(204).send();
-    } catch (error) {
-        console.error('Error al eliminar tenant:', error);
-        return res.status(500).json({ error: 'Error interno del servidor' });
-    }
+  const { id } = req.params;
+  try {
+    const result = await db.query('DELETE FROM tenants WHERE id = $1 RETURNING *', [id]);
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Tenant no encontrado para eliminar' });
+    return res.status(204).send();
+  } catch (error) {
+    console.error('Error al eliminar tenant:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
 };
