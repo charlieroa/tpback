@@ -80,15 +80,40 @@ function normalizeDateKeyword(dateStr) {
 
 function normalizeHumanTimeToHHMM(t) {
   if (!t) return t;
-  let s = String(t).trim().toLowerCase().replace(/\s+/g, '');
+  
+  const original = String(t).trim();
+  let s = original.toLowerCase().replace(/\s+/g, '');
+  
+  console.log('🕐 [normalizeHumanTimeToHHMM] Input:', original);
+  console.log('   Input procesado (sin espacios):', s);
+  
+  // Buscar patrón: número + opcional(:minutos) + opcional(am/pm)
   const m = s.match(/^(\d{1,2})(?::?(\d{2}))?(am|pm)?$/);
-  if (!m) return cleanHHMM(t);
+  if (!m) {
+    console.log('   ⚠️ No match con regex, usando cleanHHMM');
+    return cleanHHMM(t);
+  }
+  
   let h = parseInt(m[1], 10);
   let mm = m[2] ? parseInt(m[2], 10) : 0;
   const ampm = m[3];
-  if (ampm === 'pm' && h < 12) h += 12;
-  if (ampm === 'am' && h === 12) h = 0;
-  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  
+  console.log('   Hora extraída:', h, '| Minuto:', mm, '| AM/PM:', ampm || 'no especificado');
+  
+  // Convertir 12h a 24h
+  if (ampm === 'pm' && h < 12) {
+    h += 12;
+    console.log('   🔄 Convertido PM a 24h:', h);
+  }
+  if (ampm === 'am' && h === 12) {
+    h = 0;
+    console.log('   🔄 Convertido 12 AM a 00');
+  }
+  
+  const result = `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  console.log('   ✅ Resultado final:', result);
+  
+  return result;
 }
 
 // ==================== RANGOS ====================
