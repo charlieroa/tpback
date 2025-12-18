@@ -139,11 +139,63 @@ exports.handleWahaWebhook = async (req, res) => {
                     );
                     const apiKey = apiKeyResult.rows[0]?.openai_api_key;
 
-                    if (apiKey && payload.media?.url) {
-                        // Descargar audio desde WAHA
+                    if (apiKey) {
+                        // Log estructura del media para debug
+                        console.log(`   📦 Media payload:`, JSON.stringify(payload.media || payload._data?.media || 'NO_MEDIA', null, 2));
+
+                        // Obtener URL o descargar desde WAHA
                         const axios = require('axios');
-                        const audioResponse = await axios.get(payload.media.url, { responseType: 'arraybuffer' });
-                        const audioBuffer = Buffer.from(audioResponse.data);
+                        let audioBuffer = null;
+
+                        // Intentar múltiples métodos para obtener el audio
+                        const WAHA_URL = process.env.WAHA_URL || 'http://212.28.189.253:3002';
+                        const WAHA_API_KEY = process.env.WAHA_API_KEY || '';
+
+                        // Método 1: URL directa del media
+                        if (payload.media?.url) {
+                            try {
+                                console.log(`   📥 Intentando URL directa: ${payload.media.url}`);
+                                const audioResponse = await axios.get(payload.media.url, {
+                                    responseType: 'arraybuffer',
+                                    timeout: 10000
+                                });
+                                audioBuffer = Buffer.from(audioResponse.data);
+                            } catch (urlError) {
+                                console.log(`   ⚠️ URL directa falló: ${urlError.message}`);
+                            }
+                        }
+
+                        // Método 2: Descargar desde WAHA usando el ID del mensaje
+                        if (!audioBuffer && payload.id) {
+                            try {
+                                console.log(`   📥 Intentando descarga via WAHA API...`);
+                                const downloadUrl = `${WAHA_URL}/api/${tenantId}/messages/${payload.id}/download`;
+                                const audioResponse = await axios.get(downloadUrl, {
+                                    responseType: 'arraybuffer',
+                                    headers: { 'X-Api-Key': WAHA_API_KEY },
+                                    timeout: 10000
+                                });
+                                audioBuffer = Buffer.from(audioResponse.data);
+                            } catch (wahaError) {
+                                console.log(`   ⚠️ WAHA API falló: ${wahaError.message}`);
+                            }
+                        }
+
+                        // Método 3: Obtener el base64 del _data si existe
+                        if (!audioBuffer && payload._data?.body) {
+                            try {
+                                console.log(`   📥 Usando base64 del payload...`);
+                                audioBuffer = Buffer.from(payload._data.body, 'base64');
+                            } catch (b64Error) {
+                                console.log(`   ⚠️ Base64 falló: ${b64Error.message}`);
+                            }
+                        }
+
+                        if (!audioBuffer) {
+                            console.log('   ❌ No se pudo obtener el audio por ningún método');
+                            await wahaService.sendMessage(tenantId, chatId, '🎤 Lo siento, no pude acceder a tu nota de voz. ¿Puedes escribir tu mensaje?');
+                            return res.status(200).send('OK');
+                        }
 
                         // Transcribir con Whisper usando axios
                         const FormData = require('form-data');
