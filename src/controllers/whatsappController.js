@@ -120,15 +120,68 @@ exports.handleWahaWebhook = async (req, res) => {
                 return res.status(200).send('OK');
             }
 
-            // Solo procesar mensajes de texto (type puede estar en payload o en _data)
             const messageType = payload.type || payload._data?.type;
-            if (messageType !== 'chat' || !payload.body) {
+            const chatId = payload.from;
+            const senderName = payload.notifyName || payload._data?.notifyName || 'Cliente';
+            let userMessage = payload.body;
+            let isVoiceMessage = false;
+
+            // Manejar notas de voz (ptt = push-to-talk)
+            if (messageType === 'ptt' || messageType === 'audio') {
+                console.log(`\n🎤 [AUDIO] De: ${senderName} (${chatId})`);
+                isVoiceMessage = true;
+
+                try {
+                    // Obtener API Key para Whisper
+                    const apiKeyResult = await db.query(
+                        'SELECT openai_api_key FROM tenants WHERE id = $1',
+                        [tenantId]
+                    );
+                    const apiKey = apiKeyResult.rows[0]?.openai_api_key;
+
+                    if (apiKey && payload.media?.url) {
+                        // Descargar audio desde WAHA
+                        const audioResponse = await fetch(payload.media.url);
+                        const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+
+                        // Transcribir con Whisper
+                        const FormData = require('form-data');
+                        const formData = new FormData();
+                        formData.append('file', audioBuffer, { filename: 'audio.ogg', contentType: 'audio/ogg' });
+                        formData.append('model', 'whisper-1');
+                        formData.append('language', 'es');
+
+                        const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${apiKey}`,
+                                ...formData.getHeaders()
+                            },
+                            body: formData
+                        });
+
+                        if (whisperResponse.ok) {
+                            const transcription = await whisperResponse.json();
+                            userMessage = transcription.text;
+                            console.log(`   📝 Transcripción: "${userMessage}"`);
+                        } else {
+                            console.error('❌ Error en Whisper:', await whisperResponse.text());
+                            await wahaService.sendMessage(tenantId, chatId, '😅 No pude entender tu mensaje de voz. ¿Puedes escribirlo?');
+                            return res.status(200).send('OK');
+                        }
+                    } else {
+                        await wahaService.sendMessage(tenantId, chatId, '🎤 Lo siento, no puedo procesar notas de voz en este momento.');
+                        return res.status(200).send('OK');
+                    }
+                } catch (voiceError) {
+                    console.error('❌ Error procesando audio:', voiceError.message);
+                    await wahaService.sendMessage(tenantId, chatId, '😅 Hubo un problema con tu nota de voz. ¿Puedes escribir tu mensaje?');
+                    return res.status(200).send('OK');
+                }
+            } else if (messageType !== 'chat' || !payload.body) {
+                // Ignorar otros tipos de mensajes (imágenes, etc)
                 return res.status(200).send('OK');
             }
-
-            const chatId = payload.from;        // Ej: 573123456789@c.us
-            const userMessage = payload.body;   // Texto del mensaje
-            const senderName = payload.notifyName || payload._data?.notifyName || 'Cliente';
 
             console.log(`\n💬 [MENSAJE] De: ${senderName} (${chatId})`);
             console.log(`   Texto: "${userMessage}"`);
@@ -190,9 +243,42 @@ exports.handleWahaWebhook = async (req, res) => {
                 }
                 conversationCache.set(cacheKey, conversationHistory);
 
-                // Responder por WhatsApp
-                await wahaService.sendMessage(tenantId, chatId, aiResponse);
-                console.log(`   ✅ Respuesta enviada`);
+                // Responder por WhatsApp (texto o voz)
+                if (isVoiceMessage && apiKey) {
+                    // Responder con audio si el mensaje original fue de voz
+                    try {
+                        const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${apiKey}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                model: 'tts-1',
+                                voice: 'nova',  // nova, alloy, echo, fable, onyx, shimmer
+                                input: aiResponse,
+                                response_format: 'opus'  // Formato compatible con WhatsApp
+                            })
+                        });
+
+                        if (ttsResponse.ok) {
+                            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+                            const audioBase64 = audioBuffer.toString('base64');
+                            await wahaService.sendVoice(tenantId, chatId, audioBase64);
+                            console.log(`   🔊 Respuesta de voz enviada`);
+                        } else {
+                            // Fallback a texto si falla TTS
+                            await wahaService.sendMessage(tenantId, chatId, aiResponse);
+                            console.log(`   ✅ Respuesta enviada (fallback texto)`);
+                        }
+                    } catch (ttsError) {
+                        console.error('⚠️ Error en TTS, enviando texto:', ttsError.message);
+                        await wahaService.sendMessage(tenantId, chatId, aiResponse);
+                    }
+                } else {
+                    await wahaService.sendMessage(tenantId, chatId, aiResponse);
+                    console.log(`   ✅ Respuesta enviada`);
+                }
 
             } catch (aiError) {
                 console.error('❌ [WEBHOOK] Error procesando con IA:', aiError.message);
@@ -376,13 +462,61 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
     // Helpers
     const normalizeDateKeyword = (dateStr) => {
         if (!dateStr) return formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd');
-        const s = String(dateStr).toLowerCase();
+        const s = String(dateStr).toLowerCase().trim();
         const now = new Date();
+        const currentYear = now.getFullYear();
         const today = formatInTimeZone(now, TIME_ZONE, 'yyyy-MM-dd');
         const tomorrow = formatInTimeZone(new Date(now.getTime() + 86400000), TIME_ZONE, 'yyyy-MM-dd');
+
         if (s.includes('mañana')) return tomorrow;
         if (s.includes('hoy')) return today;
-        return dateStr;
+
+        // Si ya es formato YYYY-MM-DD, verificar que no sea pasado
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+            if (s < today) {
+                // Si la fecha es pasada, agregar un año
+                const parts = s.split('-');
+                return `${parseInt(parts[0]) + 1}-${parts[1]}-${parts[2]}`;
+            }
+            return s;
+        }
+
+        // Parsear fechas en español: "3 de enero", "15 de marzo", etc.
+        const meses = {
+            'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
+            'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12
+        };
+
+        // Buscar patrón: "3 de enero", "15 marzo", "enero 3"
+        let day = null, month = null;
+
+        for (const [mesName, mesNum] of Object.entries(meses)) {
+            if (s.includes(mesName)) {
+                month = mesNum;
+                // Buscar el día
+                const dayMatch = s.match(/(\d{1,2})/);
+                if (dayMatch) {
+                    day = parseInt(dayMatch[1], 10);
+                }
+                break;
+            }
+        }
+
+        if (day && month) {
+            let year = currentYear;
+            // Crear la fecha propuesta
+            const proposedDate = new Date(year, month - 1, day);
+            // Si la fecha ya pasó, usar el próximo año
+            if (proposedDate < now) {
+                year = currentYear + 1;
+            }
+            const mm = String(month).padStart(2, '0');
+            const dd = String(day).padStart(2, '0');
+            return `${year}-${mm}-${dd}`;
+        }
+
+        // Si no se pudo parsear, devolver hoy
+        return today;
     };
 
     const normalizeHumanTime = (t) => {

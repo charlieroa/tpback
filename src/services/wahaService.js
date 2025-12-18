@@ -174,11 +174,52 @@ const sendButtons = async (sessionName, chatId, text, buttons) => {
     }
 };
 
+/**
+ * 7. ENVIAR NOTA DE VOZ
+ */
+const sendVoice = async (sessionName, chatId, audioBase64) => {
+    try {
+        console.log(`📤 [WAHA] Enviando nota de voz a ${chatId}`);
+
+        const response = await apiClient.post(`/api/sendVoice`, {
+            session: sessionName,
+            chatId: chatId,
+            file: {
+                mimetype: 'audio/ogg; codecs=opus',
+                data: audioBase64
+            }
+        });
+
+        console.log(`✅ [WAHA] Nota de voz enviada exitosamente`);
+        return response.data;
+    } catch (error) {
+        console.error(`❌ [WAHA] Error enviando nota de voz:`, error.message);
+        throw error;
+    }
+};
+
+/**
+ * 8. DESCARGAR ARCHIVO DE MEDIA (para transcribir audios)
+ */
+const getMediaBuffer = async (sessionName, messageId) => {
+    try {
+        const response = await apiClient.get(`/api/${sessionName}/messages/${messageId}/download`, {
+            responseType: 'arraybuffer'
+        });
+        return Buffer.from(response.data);
+    } catch (error) {
+        console.error(`❌ [WAHA] Error descargando media:`, error.message);
+        throw error;
+    }
+};
+
 module.exports = {
     startSession,
     getQrRawData,
     getSessionStatus,
     deleteSession,
     sendMessage,
-    sendButtons
+    sendButtons,
+    sendVoice,
+    getMediaBuffer
 };
