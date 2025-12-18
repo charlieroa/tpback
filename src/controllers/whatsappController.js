@@ -169,13 +169,15 @@ exports.handleWahaWebhook = async (req, res) => {
             }
 
             try {
-                // Procesar con IA
+                // Procesar con IA (pasamos nombre y teléfono del cliente de WAHA)
                 const aiResponse = await processWithAI(
                     apiKey,
                     tenantId,
                     clientId,
                     userMessage,
-                    conversationHistory
+                    conversationHistory,
+                    senderName,
+                    phoneNumber
                 );
 
                 // Actualizar historial
@@ -214,13 +216,14 @@ exports.handleWahaWebhook = async (req, res) => {
 /* ==============   HELPER: PROCESAR CON IA (OPENAI)   =============== */
 /* =================================================================== */
 
-async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory) {
-    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de una peluquería que responde por WhatsApp. 
-Ayudas a los clientes a consultar servicios, ver estilistas disponibles y agendar citas.
+async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, senderName = 'Cliente', phoneNumber = '') {
+    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de una peluquería que responde por WhatsApp.
+El cliente se llama ${senderName}. Usa su nombre para ser más personal.
 
 REGLAS:
 - Sé amable, conciso y usa emojis 💇✂️📅
 - Si el cliente quiere agendar, pregunta servicio, fecha y hora
+- NO pidas nombre ni teléfono - ya los tienes (${senderName}, ${phoneNumber})
 - Usa las funciones disponibles para obtener información real
 - Las fechas "hoy" y "mañana" son válidas
 - Respuestas cortas (máximo 2-3 oraciones por mensaje)`;
@@ -331,7 +334,7 @@ REGLAS:
         console.log(`   🔧 Ejecutando función: ${functionName}`);
 
         // Ejecutar la función
-        const functionResult = await executeWhatsAppFunction(functionName, functionArgs, tenantId, clientId);
+        const functionResult = await executeWhatsAppFunction(functionName, functionArgs, tenantId, clientId, senderName, phoneNumber);
 
         // Segunda llamada para formatear respuesta
         const followUpMessages = [
@@ -369,7 +372,7 @@ REGLAS:
 /* ==============   HELPER: EJECUTAR FUNCIONES   ===================== */
 /* =================================================================== */
 
-async function executeWhatsAppFunction(functionName, args, tenantId, clientId) {
+async function executeWhatsAppFunction(functionName, args, tenantId, clientId, senderName = 'Cliente', phoneNumber = '') {
     // Helpers
     const normalizeDateKeyword = (dateStr) => {
         if (!dateStr) return formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd');
@@ -529,8 +532,37 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId) {
             }
 
             case 'agendar_cita': {
-                if (!clientId) {
-                    return { success: false, message: 'Para agendar, necesito tu número registrado. ¿Podrías darnos tu nombre?' };
+                // Si no hay clientId, crear cliente automáticamente con datos de WAHA
+                let finalClientId = clientId;
+                if (!finalClientId && phoneNumber) {
+                    console.log(`   👤 Creando cliente: ${senderName} (${phoneNumber})`);
+                    try {
+                        // Buscar si ya existe por teléfono
+                        const existingClient = await db.query(
+                            `SELECT id FROM users WHERE tenant_id = $1 AND role_id = 4 AND phone LIKE $2 LIMIT 1`,
+                            [tenantId, `%${phoneNumber.slice(-10)}%`]
+                        );
+                        if (existingClient.rows.length > 0) {
+                            finalClientId = existingClient.rows[0].id;
+                        } else {
+                            // Crear cliente nuevo
+                            const newClient = await db.query(
+                                `INSERT INTO users (tenant_id, role_id, first_name, last_name, email, password_hash, phone)
+                                 VALUES ($1, 4, $2, '', $3, 'whatsapp', $4)
+                                 RETURNING id`,
+                                [tenantId, senderName, `${phoneNumber}@whatsapp.temp`, phoneNumber]
+                            );
+                            finalClientId = newClient.rows[0].id;
+                            console.log(`   ✅ Cliente creado: ID ${finalClientId}`);
+                        }
+                    } catch (createErr) {
+                        console.error('   ❌ Error creando cliente:', createErr.message);
+                        return { success: false, message: 'Hubo un problema registrando tus datos. Por favor intenta de nuevo.' };
+                    }
+                }
+
+                if (!finalClientId) {
+                    return { success: false, message: 'No pude obtener tus datos. Por favor intenta de nuevo.' };
                 }
 
                 const fecha = normalizeDateKeyword(args.fecha);
@@ -573,7 +605,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId) {
                 await db.query(
                     `INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status)
                      VALUES ($1, $2, $3, $4, $5, $6, 'scheduled')`,
-                    [tenantId, clientId, estilista.id, servicio.id, startTime, endTime]
+                    [tenantId, finalClientId, estilista.id, servicio.id, startTime, endTime]
                 );
 
                 return {
