@@ -141,31 +141,32 @@ exports.handleWahaWebhook = async (req, res) => {
 
                     if (apiKey && payload.media?.url) {
                         // Descargar audio desde WAHA
-                        const audioResponse = await fetch(payload.media.url);
-                        const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+                        const axios = require('axios');
+                        const audioResponse = await axios.get(payload.media.url, { responseType: 'arraybuffer' });
+                        const audioBuffer = Buffer.from(audioResponse.data);
 
-                        // Transcribir con Whisper
+                        // Transcribir con Whisper usando axios
                         const FormData = require('form-data');
                         const formData = new FormData();
                         formData.append('file', audioBuffer, { filename: 'audio.ogg', contentType: 'audio/ogg' });
                         formData.append('model', 'whisper-1');
                         formData.append('language', 'es');
 
-                        const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${apiKey}`,
-                                ...formData.getHeaders()
-                            },
-                            body: formData
-                        });
-
-                        if (whisperResponse.ok) {
-                            const transcription = await whisperResponse.json();
-                            userMessage = transcription.text;
+                        try {
+                            const whisperResponse = await axios.post(
+                                'https://api.openai.com/v1/audio/transcriptions',
+                                formData,
+                                {
+                                    headers: {
+                                        'Authorization': `Bearer ${apiKey}`,
+                                        ...formData.getHeaders()
+                                    }
+                                }
+                            );
+                            userMessage = whisperResponse.data.text;
                             console.log(`   📝 Transcripción: "${userMessage}"`);
-                        } else {
-                            console.error('❌ Error en Whisper:', await whisperResponse.text());
+                        } catch (whisperError) {
+                            console.error('❌ Error en Whisper:', whisperError.response?.data || whisperError.message);
                             await wahaService.sendMessage(tenantId, chatId, '😅 No pude entender tu mensaje de voz. ¿Puedes escribirlo?');
                             return res.status(200).send('OK');
                         }
