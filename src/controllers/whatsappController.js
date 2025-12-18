@@ -120,14 +120,15 @@ exports.handleWahaWebhook = async (req, res) => {
                 return res.status(200).send('OK');
             }
 
-            // Solo procesar mensajes de texto
-            if (payload.type !== 'chat' || !payload.body) {
+            // Solo procesar mensajes de texto (type puede estar en payload o en _data)
+            const messageType = payload.type || payload._data?.type;
+            if (messageType !== 'chat' || !payload.body) {
                 return res.status(200).send('OK');
             }
 
             const chatId = payload.from;        // Ej: 573123456789@c.us
             const userMessage = payload.body;   // Texto del mensaje
-            const senderName = payload.notifyName || 'Cliente';
+            const senderName = payload.notifyName || payload._data?.notifyName || 'Cliente';
 
             console.log(`\n💬 [MENSAJE] De: ${senderName} (${chatId})`);
             console.log(`   Texto: "${userMessage}"`);
