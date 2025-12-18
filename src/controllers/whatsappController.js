@@ -723,8 +723,11 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
             }
 
             case 'verificar_disponibilidad': {
+                console.log(`   📅 [DEBUG] args.fecha recibido de GPT: "${args.fecha}"`);
                 const fecha = normalizeDateKeyword(args.fecha);
+                console.log(`   📅 [DEBUG] fecha normalizada: "${fecha}"`);
                 const hora = args.hora ? normalizeHumanTime(args.hora) : null;
+                console.log(`   📅 [DEBUG] args.hora: "${args.hora}" -> hora normalizada: "${hora}"`);
 
                 const svcResult = await db.query(
                     `SELECT id, name, duration_minutes FROM services 
@@ -835,8 +838,10 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     return { success: false, message: 'No pude obtener tus datos. Por favor intenta de nuevo.' };
                 }
 
+                console.log(`   📅 [DEBUG agendar] args.fecha: "${args.fecha}", args.hora: "${args.hora}"`);
                 const fecha = normalizeDateKeyword(args.fecha);
                 const hora = normalizeHumanTime(args.hora);
+                console.log(`   📅 [DEBUG agendar] fecha normalizada: "${fecha}", hora: "${hora}"`);
 
                 const svcResult = await db.query(
                     `SELECT id, name, duration_minutes FROM services WHERE tenant_id = $1 AND LOWER(name) LIKE $2 LIMIT 1`,
