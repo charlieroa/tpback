@@ -409,8 +409,13 @@ exports.handleWahaWebhook = async (req, res) => {
 /* =================================================================== */
 
 async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, senderName = 'Cliente', phoneNumber = '', tenantName = 'nuestra peluquería') {
+    // Obtener la fecha actual en Colombia para contexto
+    const hoyStr = formatInTimeZone(new Date(), TIME_ZONE, "EEEE d 'de' MMMM 'de' yyyy", { locale: require('date-fns/locale/es') });
+
     const SYSTEM_PROMPT = `Eres un asistente virtual amigable de "${tenantName}" que responde por WhatsApp.
 El cliente se llama ${senderName}. Usa su nombre para ser más personal.
+
+FECHA ACTUAL: Hoy es ${hoyStr}. Usa esta información para interpretar fechas correctamente.
 
 BIENVENIDA:
 - Si el cliente saluda, responde: "¡Hola ${senderName}! 👋 Bienvenido/a a ${tenantName}. ¿En qué te puedo ayudar?"
@@ -468,14 +473,20 @@ ESTILO:
             type: "function",
             function: {
                 name: "verificar_disponibilidad",
-                description: "Verifica disponibilidad para un servicio",
+                description: "Verifica disponibilidad para un servicio en una fecha y hora específica",
                 parameters: {
                     type: "object",
                     properties: {
-                        servicio: { type: "string" },
-                        estilista: { type: "string" },
-                        fecha: { type: "string" },
-                        hora: { type: "string" }
+                        servicio: { type: "string", description: "Nombre del servicio" },
+                        estilista: { type: "string", description: "Nombre del estilista (opcional)" },
+                        fecha: {
+                            type: "string",
+                            description: "Fecha deseada. Usar EXACTAMENTE las palabras del cliente: 'hoy', 'mañana', 'sábado', 'lunes', '21 de diciembre', etc. NO convertir a formato ISO, pasar el texto tal cual."
+                        },
+                        hora: {
+                            type: "string",
+                            description: "Hora deseada. Usar texto del cliente: '3pm', '15:00', '3 de la tarde', etc."
+                        }
                     },
                     required: ["servicio"]
                 }
@@ -485,14 +496,20 @@ ESTILO:
             type: "function",
             function: {
                 name: "agendar_cita",
-                description: "Agenda una cita confirmada",
+                description: "Agenda una cita confirmada por el cliente",
                 parameters: {
                     type: "object",
                     properties: {
-                        servicio: { type: "string" },
-                        estilista: { type: "string" },
-                        fecha: { type: "string" },
-                        hora: { type: "string" }
+                        servicio: { type: "string", description: "Nombre del servicio" },
+                        estilista: { type: "string", description: "Nombre del estilista" },
+                        fecha: {
+                            type: "string",
+                            description: "Fecha confirmada. Usar palabras del cliente: 'hoy', 'mañana', 'sábado', '21 de diciembre'. NO convertir a ISO."
+                        },
+                        hora: {
+                            type: "string",
+                            description: "Hora confirmada: '3pm', '15:00', etc."
+                        }
                     },
                     required: ["servicio", "fecha", "hora"]
                 }
