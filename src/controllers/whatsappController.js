@@ -151,12 +151,18 @@ exports.handleWahaWebhook = async (req, res) => {
                         const WAHA_URL = process.env.WAHA_URL || 'http://212.28.189.253:3002';
                         const WAHA_API_KEY = process.env.WAHA_API_KEY || '';
 
-                        // Método 1: URL directa del media
+                        // Método 1: URL directa del media (reemplazar localhost con URL real de WAHA)
                         if (payload.media?.url) {
                             try {
-                                console.log(`   📥 Intentando URL directa: ${payload.media.url}`);
-                                const audioResponse = await axios.get(payload.media.url, {
+                                // WAHA devuelve localhost:3000 pero corre en WAHA_URL
+                                let mediaUrl = payload.media.url;
+                                if (mediaUrl.includes('localhost:3000')) {
+                                    mediaUrl = mediaUrl.replace('http://localhost:3000', WAHA_URL);
+                                }
+                                console.log(`   📥 Intentando URL: ${mediaUrl}`);
+                                const audioResponse = await axios.get(mediaUrl, {
                                     responseType: 'arraybuffer',
+                                    headers: { 'X-Api-Key': WAHA_API_KEY },
                                     timeout: 10000
                                 });
                                 audioBuffer = Buffer.from(audioResponse.data);
