@@ -590,6 +590,22 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
         if (s.includes('mañana')) return tomorrow;
         if (s.includes('hoy')) return today;
 
+        // Días de la semana: "sábado", "lunes", etc.
+        const diasSemana = {
+            'domingo': 0, 'lunes': 1, 'martes': 2, 'miercoles': 3, 'miércoles': 3,
+            'jueves': 4, 'viernes': 5, 'sabado': 6, 'sábado': 6
+        };
+
+        for (const [diaName, diaNum] of Object.entries(diasSemana)) {
+            if (s.includes(diaName)) {
+                const todayNum = now.getDay();
+                let daysToAdd = diaNum - todayNum;
+                if (daysToAdd <= 0) daysToAdd += 7; // Si hoy es el día o ya pasó, ir al próximo
+                const targetDate = new Date(now.getTime() + daysToAdd * 86400000);
+                return formatInTimeZone(targetDate, TIME_ZONE, 'yyyy-MM-dd');
+            }
+        }
+
         // Si ya es formato YYYY-MM-DD, verificar que no sea pasado
         if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
             if (s < today) {
@@ -635,6 +651,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
         }
 
         // Si no se pudo parsear, devolver hoy
+        console.log(`⚠️ normalizeDateKeyword: No pude parsear "${dateStr}", usando hoy: ${today}`);
         return today;
     };
 
