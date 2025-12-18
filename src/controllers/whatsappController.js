@@ -306,27 +306,72 @@ exports.handleWahaWebhook = async (req, res) => {
                 if (isVoiceMessage && apiKey) {
                     // Responder con audio si el mensaje original fue de voz
                     try {
-                        const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${apiKey}`,
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                model: 'tts-1-hd',     // HD para mejor calidad
-                                voice: 'alloy',       // Voz más natural y neutral
-                                input: aiResponse,
-                                response_format: 'opus'
-                            })
-                        });
+                        let audioBase64 = null;
 
-                        if (ttsResponse.ok) {
-                            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-                            const audioBase64 = audioBuffer.toString('base64');
+                        // Intentar obtener ElevenLabs API key del tenant
+                        const tenantResult = await db.query(
+                            'SELECT elevenlabs_api_key, elevenlabs_voice_id FROM tenants WHERE id = $1',
+                            [tenantId]
+                        );
+                        const elevenLabsKey = tenantResult.rows[0]?.elevenlabs_api_key;
+                        const voiceId = tenantResult.rows[0]?.elevenlabs_voice_id || 'pNInz6obpgDQGcFmaJgB';  // Adam - voz clara en español
+
+                        // Usar ElevenLabs si está configurado
+                        if (elevenLabsKey) {
+                            console.log('   🎙️ Usando ElevenLabs TTS...');
+                            const elevenLabsResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+                                method: 'POST',
+                                headers: {
+                                    'xi-api-key': elevenLabsKey,
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    text: aiResponse,
+                                    model_id: 'eleven_multilingual_v2',
+                                    voice_settings: {
+                                        stability: 0.5,
+                                        similarity_boost: 0.75
+                                    }
+                                })
+                            });
+
+                            if (elevenLabsResponse.ok) {
+                                const audioBuffer = Buffer.from(await elevenLabsResponse.arrayBuffer());
+                                audioBase64 = audioBuffer.toString('base64');
+                                console.log('   ✅ Audio generado con ElevenLabs');
+                            } else {
+                                console.error('   ⚠️ Error ElevenLabs:', await elevenLabsResponse.text());
+                            }
+                        }
+
+                        // Fallback a OpenAI TTS si ElevenLabs no está disponible
+                        if (!audioBase64) {
+                            console.log('   🔊 Usando OpenAI TTS (fallback)...');
+                            const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': `Bearer ${apiKey}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    model: 'tts-1-hd',
+                                    voice: 'alloy',
+                                    input: aiResponse,
+                                    response_format: 'opus'
+                                })
+                            });
+
+                            if (ttsResponse.ok) {
+                                const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+                                audioBase64 = audioBuffer.toString('base64');
+                            }
+                        }
+
+                        // Enviar audio o texto
+                        if (audioBase64) {
                             await wahaService.sendVoice(tenantId, chatId, audioBase64);
                             console.log(`   🔊 Respuesta de voz enviada`);
                         } else {
-                            // Fallback a texto si falla TTS
                             await wahaService.sendMessage(tenantId, chatId, aiResponse);
                             console.log(`   ✅ Respuesta enviada (fallback texto)`);
                         }
