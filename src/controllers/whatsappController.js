@@ -313,10 +313,10 @@ exports.handleWahaWebhook = async (req, res) => {
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
-                                model: 'tts-1',
-                                voice: 'nova',  // nova, alloy, echo, fable, onyx, shimmer
+                                model: 'tts-1-hd',     // HD para mejor calidad
+                                voice: 'alloy',       // Voz más natural y neutral
                                 input: aiResponse,
-                                response_format: 'opus'  // Formato compatible con WhatsApp
+                                response_format: 'opus'
                             })
                         });
 
@@ -362,16 +362,21 @@ exports.handleWahaWebhook = async (req, res) => {
 /* =================================================================== */
 
 async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, senderName = 'Cliente', phoneNumber = '') {
-    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de una peluquería que responde por WhatsApp.
+    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de una peluquería colombiana que responde por WhatsApp.
 El cliente se llama ${senderName}. Usa su nombre para ser más personal.
 
+ESTILO DE COMUNICACIÓN:
+- Habla en español colombiano natural y amigable
+- Usa expresiones como "¡Listo!", "¡Claro que sí!", "Con mucho gusto", "¿Qué más te puedo ayudar?"
+- Sé cálido y cercano, pero profesional
+- Usa emojis con moderación 💇✂️📅
+
 REGLAS:
-- Sé amable, conciso y usa emojis 💇✂️📅
 - Si el cliente quiere agendar, pregunta servicio, fecha y hora
 - NO pidas nombre ni teléfono - ya los tienes (${senderName}, ${phoneNumber})
 - Usa las funciones disponibles para obtener información real
 - Las fechas "hoy" y "mañana" son válidas
-- Respuestas cortas (máximo 2-3 oraciones por mensaje)`;
+- Respuestas cortas y naturales (máximo 2-3 oraciones)`;
 
     const FUNCTIONS = [
         {
