@@ -830,12 +830,13 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 let queryParams = [tenantId, servicio.id];
                 let stylistCondition = '';
                 if (args.estilista) {
-                    stylistCondition = `AND (LOWER(u.first_name) LIKE $3)`;
+                    // Buscar por nombre O nombre completo (igual que verificar_disponibilidad)
+                    stylistCondition = `AND (LOWER(u.first_name) LIKE $3 OR LOWER(CONCAT(u.first_name, ' ', u.last_name)) LIKE $3)`;
                     queryParams.push(`%${args.estilista.toLowerCase()}%`);
                 }
 
                 const stylistResult = await db.query(
-                    `SELECT u.id, u.first_name FROM users u
+                    `SELECT u.id, u.first_name, u.last_name FROM users u
                      INNER JOIN stylist_services ss ON u.id = ss.user_id
                      WHERE u.tenant_id = $1 AND ss.service_id = $2 AND u.role_id = 3
                      ${stylistCondition} LIMIT 1`,
@@ -843,12 +844,30 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 );
 
                 if (stylistResult.rows.length === 0) {
-                    return { success: false, message: 'No hay estilistas disponibles' };
+                    const estilistaNombre = args.estilista || 'ninguno especificado';
+                    return { success: false, message: `No hay estilistas disponibles para este servicio${args.estilista ? ` (${estilistaNombre})` : ''}. ¿Quieres ver los estilistas disponibles?` };
                 }
 
                 const estilista = stylistResult.rows[0];
+                const nombreEstilista = `${estilista.first_name} ${estilista.last_name || ''}`.trim();
                 const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
                 const endTime = new Date(startTime.getTime() + servicio.duration_minutes * 60000);
+
+                // Verificar conflictos de horario antes de agendar
+                const conflict = await db.query(
+                    `SELECT id FROM appointments 
+                     WHERE tenant_id = $1 AND stylist_id = $2 
+                     AND status IN ('scheduled','rescheduled','checked_in')
+                     AND (start_time, end_time) OVERLAPS ($3::timestamptz, $4::timestamptz)`,
+                    [tenantId, estilista.id, startTime, endTime]
+                );
+
+                if (conflict.rows.length > 0) {
+                    return {
+                        success: false,
+                        message: `❌ ${nombreEstilista} ya tiene una cita a esa hora. ¿Quieres otra hora o probar con otro estilista?`
+                    };
+                }
 
                 await db.query(
                     `INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status)
@@ -858,7 +877,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
 
                 return {
                     success: true,
-                    message: `🎉 ¡Cita agendada!\n📅 ${fecha} a las ${hora}\n💇 ${servicio.name}\n👤 ${estilista.first_name}\n\n¡Te esperamos!`
+                    message: `🎉 ¡Cita agendada!\n📅 ${fecha} a las ${hora}\n💇 ${servicio.name}\n👤 ${nombreEstilista}\n\n¡Te esperamos!`
                 };
             }
 
