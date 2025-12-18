@@ -38,8 +38,12 @@ const dbToApiTenant = (row) => ({
   products_for_staff_enabled: row.products_for_staff_enabled,
   admin_fee_enabled: row.admin_fee_enabled,
   loans_to_staff_enabled: row.loans_to_staff_enabled,
-  // ⬅️ NUEVO: flag para permitir citas en pasado
+  // Flag para permitir citas en pasado
   allow_past_appointments: !!row.allow_past_appointments,
+  // OpenAI API Key (solo mostramos los últimos 4 caracteres por seguridad)
+  openai_api_key: row.openai_api_key
+    ? '****' + row.openai_api_key.slice(-4)
+    : null,
   created_at: row.created_at,
   updated_at: row.updated_at,
 });
@@ -178,9 +182,17 @@ exports.updateTenant = async (req, res) => {
     if (body.loans_to_staff_enabled !== undefined)
       payload.loans_to_staff_enabled = !!body.loans_to_staff_enabled;
 
-    // ⬅️ NUEVO: actualizar flag de citas en pasado
+    // Flag de citas en pasado
     if (body.allow_past_appointments !== undefined)
       payload.allow_past_appointments = !!body.allow_past_appointments;
+
+    // OpenAI API Key (solo guardar si viene un valor válido)
+    if (body.openai_api_key !== undefined && body.openai_api_key !== null) {
+      // Solo actualizar si no es el placeholder
+      if (!body.openai_api_key.startsWith('****')) {
+        payload.openai_api_key = body.openai_api_key.trim() || null;
+      }
+    }
 
     if (Object.keys(payload).length === 0) {
       const current = await db.query('SELECT * FROM tenants WHERE id = $1', [id]);

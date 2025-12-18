@@ -31,6 +31,12 @@ router.get(
   appointmentController.verifyStylistServiceAndAvailabilityPublic
 );
 
+// 🎯 DIGITURNO: Cola de servicios (público)
+router.get(
+  '/digiturno/queue/:tenantId',
+  appointmentController.getDigiturnoQueue
+);
+
 // =====================================================================
 // EXISTENTES: AI Orchestrator Público
 // =====================================================================

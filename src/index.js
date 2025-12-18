@@ -8,11 +8,10 @@ const fs = require('fs');
 const multer = require('multer');
 const http = require('http');
 
-// Sockets (ajusta la ruta si pusiste el archivo en otro lugar)
-// Si lo tienes en ./socket.js, cambia a: const { initSocket } = require('./socket');
+// Sockets
 const { initSocket } = require('./socket');
 
-// Configuración de la base de datos (se importa después de dotenv)
+// Configuración de la base de datos
 const db = require('./config/db');
 
 // Importación de todas las rutas
@@ -30,6 +29,8 @@ const cashRoutes = require('./routes/cashRoutes');
 const productCategoryRoutes = require('./routes/productCategoryRoutes');
 const staffPurchaseRoutes = require('./routes/staffPurchaseRoutes');
 const staffLoanRoutes = require('./routes/staffLoanRoutes');
+const whatsappRoutes = require('./routes/whatsappRoutes'); // ✅ NUEVO: Importar rutas de WhatsApp
+const aiChatRoutes = require('./routes/aiChatRoutes'); // ✅ Chat con IA (OpenAI)
 const { uploadTenantLogo } = require('./controllers/tenantController');
 
 // Inicialización de la aplicación Express
@@ -37,7 +38,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* =======================================
-    🛡️ CONFIGURACIÓN DE CORS
+   🛡️ CONFIGURACIÓN DE CORS
 ======================================= */
 const allowedOrigins = [
   'http://localhost:3001',
@@ -59,12 +60,12 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 /* =======================================
-    🚀 MIDDLEWARES ESENCIALES
+   🚀 MIDDLEWARES ESENCIALES
 ======================================= */
 app.use(express.json());
 
 /* =======================================
-    🗂️ SERVICIO DE ARCHIVOS ESTÁTICOS
+   🗂️ SERVICIO DE ARCHIVOS ESTÁTICOS
 ======================================= */
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const UPLOADS_DIR = path.join(PUBLIC_DIR, 'uploads');
@@ -74,7 +75,7 @@ fs.mkdirSync(LOGOS_DIR, { recursive: true });
 app.use(express.static(PUBLIC_DIR));
 
 /* =======================================
-    ⬆️ CONFIGURACIÓN DE SUBIDA DE ARCHIVOS (MULTER)
+   ⬆️ CONFIGURACIÓN DE SUBIDA DE ARCHIVOS (MULTER)
 ======================================= */
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, LOGOS_DIR),
@@ -86,14 +87,14 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* =======================================
-    📡 RUTAS DE LA APLICACIÓN
+   📡 RUTAS DE LA APLICACIÓN
 ======================================= */
 app.get('/', (_req, res) => res.send('¡API de TuPelukeria.com funcionando!'));
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/services', serviceRoutes);
-app.use('/api/appointments', appointmentRoutes); // ✅ Esta línea sigue igual
+app.use('/api/appointments', appointmentRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/payrolls', payrollRoutes);
@@ -103,10 +104,12 @@ app.use('/api/product-categories', productCategoryRoutes);
 app.use('/api/cash', cashRoutes);
 app.use('/api/staff-purchases', staffPurchaseRoutes);
 app.use('/api/staff-loans', staffLoanRoutes);
+app.use('/api/whatsapp', whatsappRoutes); // ✅ NUEVO: Habilitar endpoints de WhatsApp
+app.use('/api/ai-chat', aiChatRoutes); // ✅ Chat con IA (OpenAI + Orquestador)
 app.post('/api/tenants/:tenantId/logo', upload.single('logo'), uploadTenantLogo);
 
 /* =======================================
-    ❤️ HEALTHCHECK (VERIFICACIÓN DE ESTADO)
+   ❤️ HEALTHCHECK (VERIFICACIÓN DE ESTADO)
 ======================================= */
 app.get(['/health', '/api/health'], async (_req, res) => {
   try {
@@ -118,7 +121,7 @@ app.get(['/health', '/api/health'], async (_req, res) => {
 });
 
 /* =======================================
-    🧯 MANEJO DE ERRORES (DEBE IR AL FINAL)
+   🧯 MANEJO DE ERRORES
 ======================================= */
 app.use((err, req, res, next) => {
   console.error(`[ERROR] ${req.method} ${req.url} - ${err.stack}`);
@@ -131,7 +134,7 @@ app.use((err, req, res, next) => {
 });
 
 /* =======================================
-    ▶️ INICIO DEL SERVIDOR (HTTP + WebSockets)
+   ▶️ INICIO DEL SERVIDOR (HTTP + WebSockets)
 ======================================= */
 const server = http.createServer(app);
 

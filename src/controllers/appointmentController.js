@@ -368,10 +368,10 @@ exports.smartAvailabilityPublic = async (req, res) => {
     let { tenantId, service, stylist, date, time, step, limit } = req.query;
 
     tenantId = clean(tenantId);
-    service  = clean(service);
-    stylist  = clean(stylist);
-    date     = clean(date);
-    time     = time ? cleanHHMM(time) : null;
+    service = clean(service);
+    stylist = clean(stylist);
+    date = clean(date);
+    time = time ? cleanHHMM(time) : null;
 
     if (!tenantId || !service || !stylist || !date) {
       return res.status(400).json({
@@ -477,14 +477,14 @@ exports.smartAvailabilityPublic = async (req, res) => {
     let suggestions = [];
 
     if (time) {
-      const wanted = String(time).slice(0,5);
+      const wanted = String(time).slice(0, 5);
       isAvailable = allLocalTimes.includes(wanted);
 
       if (!isAvailable) {
         const wantedDate = makeLocalUtc(date, wanted);
         const withDist = filteredSlots.map(d => ({
           d, dist: Math.abs(d.getTime() - wantedDate.getTime())
-        })).sort((a,b)=>a.dist - b.dist);
+        })).sort((a, b) => a.dist - b.dist);
 
         suggestions = [...new Set(withDist.slice(0, suggestLimit).map(x => toLocalHHmm(x.d)))];
       }
@@ -512,12 +512,12 @@ exports.smartAvailabilityPublicJSON = async (req, res) => {
     const { tenantId, service, stylist, date, time, step, limit } = req.body || {};
     req.query = {
       tenantId: tenantId ?? '',
-      service:  service  ?? '',
-      stylist:  stylist  ?? '',
-      date:     date     ?? '',
-      time:     time     ?? '',
-      step:     step     ?? '',
-      limit:    limit    ?? ''
+      service: service ?? '',
+      stylist: stylist ?? '',
+      date: date ?? '',
+      time: time ?? '',
+      step: step ?? '',
+      limit: limit ?? ''
     };
     return exports.smartAvailabilityPublic(req, res);
   } catch (e) {
@@ -530,10 +530,10 @@ exports.verifyStylistServiceAndAvailabilityPublic = async (req, res) => {
   try {
     let { tenantId, service, stylist, date, time, limit } = req.query;
     tenantId = clean(tenantId);
-    service  = clean(service);
-    stylist  = clean(stylist);
-    date     = clean(date);
-    time     = cleanHHMM(time);
+    service = clean(service);
+    stylist = clean(stylist);
+    date = clean(date);
+    time = cleanHHMM(time);
     const suggestLimit = Math.max(1, parseInt(limit || '5', 10));
 
     if (!tenantId || !service || !stylist || !date || !time) {
@@ -566,7 +566,7 @@ exports.verifyStylistServiceAndAvailabilityPublic = async (req, res) => {
       return res.status(409).json({ error: 'El estilista no está activo.' });
     }
 
-    const stylistName = `${sty.first_name} ${sty.last_name||''}`.trim();
+    const stylistName = `${sty.first_name} ${sty.last_name || ''}`.trim();
 
     // Ofrece servicio
     const offersService = await checkStylistOffersService(sty.id, svc.id);
@@ -611,12 +611,12 @@ exports.verifyStylistServiceAndAvailabilityPublic = async (req, res) => {
     if (!isAvailable) {
       const withDist = filteredSlots
         .map(d => ({ d, dist: Math.abs(d.getTime() - wantedStart.getTime()) }))
-        .sort((a,b)=>a.dist-b.dist);
+        .sort((a, b) => a.dist - b.dist);
 
       const alternos = await findAvailableStylists(tenantId, svc.name, date, time);
       const altStylists = alternos
         .filter(u => u.id !== sty.id)
-        .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }));
+        .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }));
 
       return res.status(200).json({
         service: { id: svc.id, name: svc.name, duration_minutes: duration },
@@ -1135,14 +1135,22 @@ exports.handleCheckout = async (req, res) => {
 
     const { stylist_id, service_id } = appointmentResult.rows[0];
 
+    // Actualizar tracking global del estilista
     await db.query('UPDATE users SET last_service_at = NOW() WHERE id = $1', [stylist_id]);
 
+    // 🎯 DIGITURNO: Actualizar posición en cola del servicio específico
     await db.query(
       `UPDATE stylist_services 
-       SET last_completed_at = NOW() 
+       SET last_completed_at = NOW(),
+           total_completed = COALESCE(total_completed, 0) + 1
        WHERE user_id = $1 AND service_id = $2`,
       [stylist_id, service_id]
     );
+
+    console.log(`🎯 [DIGITURNO] Cola actualizada:`);
+    console.log(`   Estilista: ${stylist_id.substring(0, 8)}...`);
+    console.log(`   Servicio: ${service_id.substring(0, 8)}...`);
+    console.log(`   ✅ Movido al final de la cola para este servicio`);
 
     await db.query('COMMIT');
     return res.status(200).json(appointmentResult.rows[0]);
@@ -1373,7 +1381,7 @@ exports.scheduleWithFallback = async (req, res) => {
       const filteredSlots = filterPastSlots(slots, date);
 
       const wantedStart = makeLocalUtc(date, time);
-      const wantedEnd   = new Date(wantedStart.getTime() + duration * 60000);
+      const wantedEnd = new Date(wantedStart.getTime() + duration * 60000);
 
       // ✅ Permitir/denegar pasado según tenant
       try {
@@ -1391,7 +1399,7 @@ exports.scheduleWithFallback = async (req, res) => {
 
       if (!inRange || filteredSlots.length === 0) {
         const withDist = filteredSlots.map(d => ({ d, dist: Math.abs(d.getTime() - wantedStart.getTime()) }))
-                               .sort((a,b)=>a.dist-b.dist);
+          .sort((a, b) => a.dist - b.dist);
         return res.status(200).json({
           booked: false,
           reason: filteredSlots.length === 0 && slots.length > 0
@@ -1408,12 +1416,12 @@ exports.scheduleWithFallback = async (req, res) => {
 
       if (!isAvailable) {
         const withDist = filteredSlots.map(d => ({ d, dist: Math.abs(d.getTime() - wantedStart.getTime()) }))
-                               .sort((a,b)=>a.dist-b.dist);
+          .sort((a, b) => a.dist - b.dist);
 
         const alternos = await findAvailableStylists(tenantId, svc.name, date, time);
         const altStylists = alternos
           .filter(u => u.id !== sty.id)
-          .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }));
+          .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }));
 
         return res.status(200).json({
           booked: false,
@@ -1464,10 +1472,10 @@ exports.scheduleWithFallback = async (req, res) => {
       const hh = toLocalHHmm(c);
       const alts = await findAvailableStylists(tenantId, svc.name, date, hh);
       if (alts.length > 0) {
-        scored.push({ d: c, dist: Math.abs(c.getTime() - wanted.getTime()), stylists: alts.slice(0,3) });
+        scored.push({ d: c, dist: Math.abs(c.getTime() - wanted.getTime()), stylists: alts.slice(0, 3) });
       }
     }
-    scored.sort((a,b)=>a.dist - b.dist);
+    scored.sort((a, b) => a.dist - b.dist);
 
     return res.status(200).json({
       booked: false,
@@ -1476,7 +1484,7 @@ exports.scheduleWithFallback = async (req, res) => {
         : 'No hay estilistas disponibles a la hora solicitada.',
       suggestions: [...new Set(scored.slice(0, suggestLimit).map(x => toLocalHHmm(x.d)))],
       alternative_stylists: (scored[0]?.stylists || []).map(s => ({
-        id: s.id, name: `${s.first_name} ${s.last_name||''}`.trim()
+        id: s.id, name: `${s.first_name} ${s.last_name || ''}`.trim()
       }))
     });
 
@@ -1513,7 +1521,7 @@ exports.aiOrchestratorPublic = async (req, res) => {
     tenantId = clean(tenantId);
     clientId = clean(clientId);
     const suggestLimit = Math.max(1, parseInt(limit || '6', 10));
-    const stepMinutes  = Math.max(5, parseInt(step || '15', 10));
+    const stepMinutes = Math.max(5, parseInt(step || '15', 10));
 
     if (!tenantId || !UUID_RE.test(tenantId)) {
       return res.status(400).json({ error: 'Falta tenantId válido (UUID).' });
@@ -1699,12 +1707,12 @@ exports.aiOrchestratorPublic = async (req, res) => {
         console.log('   wantedDate:', wantedDate.toISOString());
 
         const withDist = filteredSlots.map(d => ({ d, dist: Math.abs(d.getTime() - wantedDate.getTime()) }))
-                               .sort((a,b)=>a.dist - b.dist);
+          .sort((a, b) => a.dist - b.dist);
 
         const alternos = await findAvailableStylists(tenantId, chosenService.name, date, wanted);
         const altStylists = alternos
           .filter(u => u.id !== chosenStylist.id)
-          .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }));
+          .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }));
 
         return res.status(200).json({
           status: 'choose_time',
@@ -1858,8 +1866,8 @@ exports.aiOrchestrator = async (req, res) => {
     let intent = clean((src.ai_intent || src.intent || '').toLowerCase());
     let ai_service = clean(src.ai_service || src.service || '');
     let ai_stylist = clean(src.ai_stylist || src.stylist || '');
-    let ai_date    = clean(src.ai_date || src.date || '');
-    let ai_time    = cleanHHMM(src.ai_time || src.time || '');
+    let ai_date = clean(src.ai_date || src.date || '');
+    let ai_time = cleanHHMM(src.ai_time || src.time || '');
 
     const suggestLimit = Math.max(1, parseInt(src.limit || '6', 10));
 
@@ -1897,7 +1905,7 @@ exports.aiOrchestrator = async (req, res) => {
           ok: true,
           intent: 'listar_estilistas',
           total: r.rowCount,
-          stylists: r.rows.map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }))
+          stylists: r.rows.map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }))
         });
       }
 
@@ -1906,7 +1914,7 @@ exports.aiOrchestrator = async (req, res) => {
           ? db.query(`SELECT id, name, duration_minutes FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`, [ai_service, tenantId])
           : db.query(`SELECT id, name, duration_minutes FROM services WHERE tenant_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`, [tenantId, ai_service]);
         const svc = (await svcQ).rows[0];
-        if (!svc) return res.status(404).json({ ok:false, error: 'Servicio no encontrado.' });
+        if (!svc) return res.status(404).json({ ok: false, error: 'Servicio no encontrado.' });
 
         // Estilista
         const styQ = UUID_RE.test(ai_stylist)
@@ -1921,9 +1929,9 @@ exports.aiOrchestrator = async (req, res) => {
                 )
               LIMIT 1`, [tenantId, ai_stylist]);
         const sty = (await styQ).rows[0];
-        if (!sty) return res.status(404).json({ ok:false, error: 'Estilista no encontrado.' });
+        if (!sty) return res.status(404).json({ ok: false, error: 'Estilista no encontrado.' });
         if ((sty.status || 'active') !== 'active') {
-          return res.status(409).json({ ok:false, error: 'El estilista no está activo.' });
+          return res.status(409).json({ ok: false, error: 'El estilista no está activo.' });
         }
 
         const offersService = await checkStylistOffersService(sty.id, svc.id);
@@ -1936,7 +1944,7 @@ exports.aiOrchestrator = async (req, res) => {
             const alts = await findAvailableStylists(tenantId, svc.name, ai_date, ai_time);
             alternatives = alts
               .filter(u => u.id !== sty.id)
-              .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }));
+              .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }));
           } else {
             const alts = await db.query(
               `SELECT u.id, u.first_name, u.last_name
@@ -1950,14 +1958,14 @@ exports.aiOrchestrator = async (req, res) => {
             );
             alternatives = alts.rows
               .filter(u => u.id !== sty.id)
-              .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }));
+              .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }));
           }
 
           return res.status(200).json({
             ok: true,
             intent: 'validar',
             service: { id: svc.id, name: svc.name },
-            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name||''}`.trim() },
+            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name || ''}`.trim() },
             offers_service: false,
             is_available: false,
             reason: 'El estilista no ofrece este servicio.',
@@ -1981,7 +1989,7 @@ exports.aiOrchestrator = async (req, res) => {
             ok: true,
             intent: 'validar',
             service: { id: svc.id, name: svc.name },
-            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name||''}`.trim() },
+            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name || ''}`.trim() },
             offers_service: true,
             is_available: false,
             reason: isPastDay
@@ -1998,7 +2006,7 @@ exports.aiOrchestrator = async (req, res) => {
             ok: true,
             intent: 'validar',
             service: { id: svc.id, name: svc.name, duration_minutes: duration },
-            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name||''}`.trim() },
+            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name || ''}`.trim() },
             offers_service: true,
             is_available: false,
             reason: 'No se proporcionó hora, mostrando opciones.',
@@ -2013,18 +2021,18 @@ exports.aiOrchestrator = async (req, res) => {
         if (!isAvailable) {
           const wantedDate = makeLocalUtc(ai_date, wanted);
           const withDist = filteredSlots.map(d => ({ d, dist: Math.abs(d.getTime() - wantedDate.getTime()) }))
-                                 .sort((a,b)=>a.dist - b.dist);
+            .sort((a, b) => a.dist - b.dist);
 
           const alternos = await findAvailableStylists(tenantId, svc.name, ai_date, ai_time);
           const altStylists = alternos
             .filter(u => u.id !== sty.id)
-            .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name||''}`.trim() }));
+            .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name || ''}`.trim() }));
 
           return res.status(200).json({
             ok: true,
             intent: 'validar',
             service: { id: svc.id, name: svc.name, duration_minutes: duration },
-            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name||''}`.trim() },
+            stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name || ''}`.trim() },
             offers_service: true,
             is_available: false,
             reason: 'No disponible a esa hora.',
@@ -2037,24 +2045,24 @@ exports.aiOrchestrator = async (req, res) => {
           ok: true,
           intent: 'validar',
           service: { id: svc.id, name: svc.name, duration_minutes: duration },
-          stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name||''}`.trim() },
+          stylist: { id: sty.id, name: `${sty.first_name} ${sty.last_name || ''}`.trim() },
           offers_service: true,
           is_available: true,
           requested: { date: ai_date, time: ai_time }
         });
       }
 
-      return res.status(400).json({ ok:false, error: 'Intención GET no reconocida.' });
+      return res.status(400).json({ ok: false, error: 'Intención GET no reconocida.' });
     }
 
     if (method === 'POST') {
       if (!intent) intent = 'agendar';
       if (intent !== 'agendar') {
-        return res.status(400).json({ ok:false, error: 'Para POST, use ai_intent=agendar.' });
+        return res.status(400).json({ ok: false, error: 'Para POST, use ai_intent=agendar.' });
       }
-      if (!clientId) return res.status(400).json({ ok:false, error: 'Falta clientId para agendar.' });
+      if (!clientId) return res.status(400).json({ ok: false, error: 'Falta clientId para agendar.' });
       if (!ai_service || !ai_date || !ai_time) {
-        return res.status(400).json({ ok:false, error: 'Faltan campos: service/date/time.' });
+        return res.status(400).json({ ok: false, error: 'Faltan campos: service/date/time.' });
       }
 
       req.body = {
@@ -2069,10 +2077,84 @@ exports.aiOrchestrator = async (req, res) => {
       return exports.scheduleWithFallback(req, res);
     }
 
-    return res.status(405).json({ ok:false, error:'Método no permitido.' });
+    return res.status(405).json({ ok: false, error: 'Método no permitido.' });
 
   } catch (err) {
     console.error('aiOrchestrator', err);
-    return res.status(500).json({ ok:false, error:'Error interno del servidor' });
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+};
+
+exports.getDigiturnoQueue = async (req, res) => {
+  try {
+    const { tenantId } = req.params;
+
+    if (!tenantId || !UUID_RE.test(tenantId)) {
+      return res.status(400).json({ error: 'tenantId inválido (UUID).' });
+    }
+
+    console.log('🎯 [DIGITURNO QUEUE] Consultando cola para tenant:', tenantId);
+
+    // Obtener todos los servicios del tenant
+    const servicesResult = await db.query(
+      `SELECT id, name FROM services WHERE tenant_id = $1 ORDER BY name`,
+      [tenantId]
+    );
+
+    const queue = [];
+
+    // Para cada servicio, obtener la cola ordenada
+    for (const service of servicesResult.rows) {
+      const stylistsResult = await db.query(
+        `SELECT 
+          u.id as stylist_id,
+          u.first_name,
+          u.last_name,
+          ss.last_completed_at,
+          ss.total_completed,
+          ROW_NUMBER() OVER (
+            ORDER BY 
+              ss.last_completed_at NULLS FIRST,
+              ss.total_completed ASC,
+              u.created_at ASC
+          ) as queue_position
+        FROM users u
+        INNER JOIN stylist_services ss ON u.id = ss.user_id
+        WHERE u.tenant_id = $1
+          AND u.role_id = 3
+          AND COALESCE(NULLIF(u.status,''),'active') = 'active'
+          AND ss.service_id = $2
+        ORDER BY 
+          ss.last_completed_at NULLS FIRST,
+          ss.total_completed ASC,
+          u.created_at ASC`,
+        [tenantId, service.id]
+      );
+
+      // Agregar cada estilista con su posición en la cola de este servicio
+      stylistsResult.rows.forEach((row) => {
+        queue.push({
+          service_id: service.id,
+          service_name: service.name,
+          stylist_id: row.stylist_id,
+          stylist_name: `${row.first_name} ${row.last_name || ''}`.trim(),
+          order: row.queue_position,
+          last_completed_at: row.last_completed_at,
+          total_completed: row.total_completed || 0
+        });
+      });
+    }
+
+    console.log(`✅ [DIGITURNO QUEUE] Cola generada: ${queue.length} registros`);
+
+    return res.status(200).json({
+      tenant_id: tenantId,
+      timestamp: new Date().toISOString(),
+      queue
+    });
+
+  } catch (error) {
+    console.error('❌ [DIGITURNO QUEUE] Error:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
