@@ -247,7 +247,7 @@ exports.handleWahaWebhook = async (req, res) => {
 
             // Obtener API Key del tenant
             const tenantResult = await db.query(
-                'SELECT openai_api_key FROM tenants WHERE id = $1',
+                'SELECT openai_api_key, name FROM tenants WHERE id = $1',
                 [tenantId]
             );
 
@@ -262,6 +262,7 @@ exports.handleWahaWebhook = async (req, res) => {
             }
 
             const apiKey = tenantResult.rows[0].openai_api_key;
+            const tenantName = tenantResult.rows[0].name || 'nuestra peluquería';
 
             // Obtener o crear historial de conversación
             const cacheKey = `${tenantId}:${chatId}`;
@@ -289,7 +290,8 @@ exports.handleWahaWebhook = async (req, res) => {
                     userMessage,
                     conversationHistory,
                     senderName,
-                    phoneNumber
+                    phoneNumber,
+                    tenantName
                 );
 
                 // Actualizar historial
@@ -406,13 +408,16 @@ exports.handleWahaWebhook = async (req, res) => {
 /* ==============   HELPER: PROCESAR CON IA (OPENAI)   =============== */
 /* =================================================================== */
 
-async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, senderName = 'Cliente', phoneNumber = '') {
-    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de una peluquería colombiana que responde por WhatsApp.
+async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, senderName = 'Cliente', phoneNumber = '', tenantName = 'nuestra peluquería') {
+    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de "${tenantName}" que responde por WhatsApp.
 El cliente se llama ${senderName}. Usa su nombre para ser más personal.
+
+BIENVENIDA:
+- Si el cliente saluda por primera vez, responde: "¡Hola ${senderName}! 👋 Bienvenido/a a ${tenantName}. ¿En qué te puedo ayudar?"
 
 ESTILO DE COMUNICACIÓN:
 - Habla en español colombiano natural y amigable
-- Usa expresiones como "¡Listo!", "¡Claro que sí!", "Con mucho gusto", "¿Qué más te puedo ayudar?"
+- Usa expresiones como "¡Listo!", "¡Claro que sí!", "Con mucho gusto"
 - Sé cálido y cercano, pero profesional
 - Usa emojis con moderación 💇✂️📅
 
@@ -644,13 +649,13 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
         switch (functionName) {
             case 'listar_servicios': {
                 const result = await db.query(
-                    `SELECT name, duration_minutes, price FROM services WHERE tenant_id = $1 ORDER BY name`,
+                    `SELECT name FROM services WHERE tenant_id = $1 ORDER BY name`,
                     [tenantId]
                 );
                 return {
                     success: true,
-                    servicios: result.rows.map(s => `${s.name} (${s.duration_minutes}min)`),
-                    message: `Servicios: ${result.rows.map(s => s.name).join(', ')}`
+                    servicios: result.rows.map(s => s.name),
+                    message: `Servicios disponibles: ${result.rows.map(s => s.name).join(', ')}`
                 };
             }
 
