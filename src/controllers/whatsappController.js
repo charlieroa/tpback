@@ -18,6 +18,11 @@ const awaitingLastNameCache = new Map();
 // Cache para guardar temporalmente el nombre mientras esperamos el apellido
 const tempFirstNameCache = new Map();
 
+// Cache para confirmar si el nombre guardado está bien
+const awaitingNameConfirmCache = new Map();
+// Cache para guardar el nombre que estamos confirmando
+const savedNameToConfirmCache = new Map();
+
 function isAwaitingName(chatId) {
     return awaitingNameCache.get(chatId) === true;
 }
@@ -46,6 +51,24 @@ function setAwaitingLastName(chatId, value, firstName = null) {
 
 function getTempFirstName(chatId) {
     return tempFirstNameCache.get(chatId);
+}
+
+function isAwaitingNameConfirm(chatId) {
+    return awaitingNameConfirmCache.get(chatId) === true;
+}
+
+function setAwaitingNameConfirm(chatId, value, savedName = null) {
+    if (value) {
+        awaitingNameConfirmCache.set(chatId, true);
+        if (savedName) savedNameToConfirmCache.set(chatId, savedName);
+    } else {
+        awaitingNameConfirmCache.delete(chatId);
+        savedNameToConfirmCache.delete(chatId);
+    }
+}
+
+function getSavedNameToConfirm(chatId) {
+    return savedNameToConfirmCache.get(chatId);
 }
 
 /* =================================================================== */
@@ -252,11 +275,50 @@ exports.handleWahaWebhook = async (req, res) => {
                     }
                 }
 
+                // Si estamos esperando confirmación del nombre guardado
+                if (isAwaitingNameConfirm(chatId)) {
+                    const respuesta = (userMessage || '').toLowerCase().trim();
+                    const savedName = getSavedNameToConfirm(chatId);
+
+                    // Si dice "sí", "si", "ok", "está bien", "así está bien", usar el nombre guardado
+                    const afirmativas = ['si', 'sí', 'ok', 'bien', 'esta bien', 'está bien', 'asi', 'así', 'correcto', 'listo', 'dale', 'va'];
+                    const esAfirmativo = afirmativas.some(a => respuesta.includes(a));
+
+                    if (esAfirmativo) {
+                        setAwaitingNameConfirm(chatId, false);
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `¡Perfecto, ${savedName}! 😊\n\n🎙️ Puedes escribirme o enviarme notas de voz.\n\n¿En qué puedo ayudarte hoy?\n• Servicios disponibles\n• Agendar una cita\n• Horarios disponibles`
+                        );
+                        return res.status(200).send('OK');
+                    } else {
+                        // Quiere cambiar su nombre, pedir uno nuevo
+                        setAwaitingNameConfirm(chatId, false);
+                        setAwaitingName(chatId, true);
+                        await wahaService.sendMessage(chatId, tenantId,
+                            '¿Cómo te gustaría que te llamemos? 😊'
+                        );
+                        return res.status(200).send('OK');
+                    }
+                }
+
                 // Si no tiene nombre válido y no estamos esperando, preguntar
                 if (hasInvalidName && !isAwaitingName(chatId)) {
                     setAwaitingName(chatId, true);
                     await wahaService.sendMessage(chatId, tenantId,
                         '¡Hola! 👋 Bienvenido a nuestro servicio de agendamiento.\n\nPara brindarte una mejor atención, ¿cómo te gustaría que te llamemos?'
+                    );
+                    return res.status(200).send('OK');
+                }
+
+                // Si tiene nombre pero es la primera interacción de la sesión, preguntar si quiere cambiar
+                // Usamos conversationCache para detectar si es primera vez en esta "sesión"
+                if (clientName && !conversationCache.has(chatId)) {
+                    // Marcar que ya preguntamos en esta sesión
+                    conversationCache.set(chatId, { askedNameConfirm: true, lastInteraction: Date.now() });
+                    setAwaitingNameConfirm(chatId, true, clientName);
+
+                    await wahaService.sendMessage(chatId, tenantId,
+                        `¡Hola! 👋 Te tengo guardado como *${clientName}*.\n\n¿Te llamo así o prefieres que te llame de otra forma?`
                     );
                     return res.status(200).send('OK');
                 }
