@@ -10,6 +10,21 @@ const TIME_ZONE = 'America/Bogota';
 // Cache para historial de conversación por número de teléfono
 const conversationCache = new Map();
 
+// Cache para rastrear cuando estamos esperando el nombre del cliente
+const awaitingNameCache = new Map();
+
+function isAwaitingName(chatId) {
+    return awaitingNameCache.get(chatId) === true;
+}
+
+function setAwaitingName(chatId, value) {
+    if (value) {
+        awaitingNameCache.set(chatId, true);
+    } else {
+        awaitingNameCache.delete(chatId);
+    }
+}
+
 /* =================================================================== */
 /* ==============   1. GET STATUS / QR IMAGE (GET)   ================= */
 /* =================================================================== */
@@ -123,9 +138,87 @@ exports.handleWahaWebhook = async (req, res) => {
 
             const messageType = payload.type || payload._data?.type;
             const chatId = payload.from;
-            const senderName = payload.notifyName || payload._data?.notifyName || 'Cliente';
+            const notifyName = payload.notifyName || payload._data?.notifyName || '';
             let userMessage = payload.body;
             let isVoiceMessage = false;
+
+            // Extraer número de teléfono
+            const phoneNumber = chatId.split('@')[0];
+
+            // ==========================================
+            // FLUJO DE NOMBRE: Verificar si ya tenemos el nombre del cliente
+            // ==========================================
+            try {
+                const existingClient = await db.query(
+                    `SELECT id, first_name FROM users 
+                     WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
+                    [tenantId, phoneNumber]
+                );
+
+                let clientId = existingClient.rows.length > 0 ? existingClient.rows[0].id : null;
+                let clientName = existingClient.rows.length > 0 ? existingClient.rows[0].first_name : null;
+
+                // Verificar si necesitamos preguntar el nombre
+                // Nombre inválido: vacío, solo números, 'Cliente', o tiene emojis al inicio
+                const hasInvalidName = !clientName ||
+                    /^\d+$/.test(clientName) ||
+                    clientName === 'Cliente' ||
+                    clientName.length < 2;
+
+                // Si estamos esperando el nombre, procesar la respuesta
+                if (isAwaitingName(chatId)) {
+                    const newName = (userMessage || '').trim();
+
+                    // Validar que el nombre sea razonable (al menos 2 caracteres, no solo números)
+                    if (newName.length >= 2 && !/^\d+$/.test(newName)) {
+                        if (clientId) {
+                            // Actualizar nombre existente
+                            await db.query(
+                                'UPDATE users SET first_name = $1, updated_at = NOW() WHERE id = $2',
+                                [newName, clientId]
+                            );
+                            console.log(`   ✅ [NOMBRE] Actualizado: ${newName} para cliente ${clientId}`);
+                        } else {
+                            // Crear nuevo cliente
+                            const newClient = await db.query(
+                                `INSERT INTO users (tenant_id, role_id, first_name, phone, email, password_hash)
+                                 VALUES ($1, 4, $2, $3, $4, 'whatsapp')
+                                 RETURNING id`,
+                                [tenantId, newName, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                            );
+                            console.log(`   ✅ [NOMBRE] Cliente creado: ${newName} con ID ${newClient.rows[0].id}`);
+                        }
+
+                        setAwaitingName(chatId, false);
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `¡Mucho gusto, ${newName}! 😊 ¿En qué puedo ayudarte hoy?\n\nPuedes preguntarme por:\n• Servicios disponibles\n• Agendar una cita\n• Horarios disponibles`
+                        );
+                        return res.status(200).send('OK');
+                    } else {
+                        // Nombre inválido, pedir de nuevo
+                        await wahaService.sendMessage(chatId, tenantId,
+                            'Por favor, dime tu nombre (mínimo 2 letras) 😊'
+                        );
+                        return res.status(200).send('OK');
+                    }
+                }
+
+                // Si no tiene nombre válido y no estamos esperando, preguntar
+                if (hasInvalidName && !isAwaitingName(chatId)) {
+                    setAwaitingName(chatId, true);
+                    await wahaService.sendMessage(chatId, tenantId,
+                        '¡Hola! 👋 Bienvenido a nuestro servicio de agendamiento.\n\nPara brindarte una mejor atención, ¿cómo te gustaría que te llamemos?'
+                    );
+                    return res.status(200).send('OK');
+                }
+
+                // Usar el nombre del cliente para el resto del flujo
+                var senderName = clientName || notifyName || 'Cliente';
+
+            } catch (nameError) {
+                console.error('   ⚠️ [NOMBRE] Error verificando cliente:', nameError.message);
+                var senderName = notifyName || 'Cliente';
+            }
 
             // Manejar notas de voz (ptt = push-to-talk)
             if (messageType === 'ptt' || messageType === 'audio') {
@@ -270,7 +363,7 @@ exports.handleWahaWebhook = async (req, res) => {
             let conversationHistory = conversationCache.get(cacheKey) || [];
 
             // Buscar cliente por número de teléfono (en tabla users con role_id=4)
-            const phoneNumber = chatId.split('@')[0];
+            // phoneNumber ya está definido arriba
             let clientId = null;
             try {
                 const clientResult = await db.query(
