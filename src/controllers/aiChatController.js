@@ -135,6 +135,11 @@ REGLAS SOBRE ESTILISTAS Y HORARIOS:
 - Las citas de HOY son válidas para cualquier horario FUTURO (no pasado)
 - Si no hay disponibilidad en un horario → sugiere horarios alternativos
 
+🎲 REGLA DE AUTO-SUGERENCIA DE ESTILISTAS:
+- Si el cliente dice "no sé", "no conozco", "sugiéreme uno", "cualquiera", "el que sea", o similar cuando le preguntas por estilista:
+  → Tú AUTOMÁTICAMENTE selecciona uno de los estilistas disponibles y sugiere: "Te sugiero a [Nombre] que está disponible a esa hora. ¿Te lo agendo?"
+  → Solo pide confirmación, NO vuelvas a preguntar por estilista.
+
 REGLAS DE FECHAS Y HORAS:
 - "hoy" es válido para citas en horarios FUTUROS del día actual
 - "mañana" siempre es válido
@@ -440,7 +445,51 @@ async function executeFunction(functionName, args, tenantId, clientId) {
                     const startTime = makeLocalUtc(fecha, hora);
                     const endTime = new Date(startTime.getTime() + (servicio.duration_minutes || 60) * 60000);
 
-                    // Ver si hay conflicto
+                    // NUEVO: Verificar que la hora no sea pasada (para citas de hoy)
+                    const now = new Date();
+                    if (startTime < now) {
+                        // Calcular próximo horario disponible
+                        const nextHour = new Date(now.getTime() + 30 * 60000); // 30 min desde ahora
+                        const nextHourStr = formatInTimeZone(nextHour, TIME_ZONE, 'HH:mm');
+                        return {
+                            success: false,
+                            message: `⏰ Ese horario (${hora}) ya pasó. Ahora son las ${formatInTimeZone(now, TIME_ZONE, 'HH:mm')}. ¿Te gustaría agendar para las ${nextHourStr} o para mañana?`
+                        };
+                    }
+
+                    // NUEVO: Verificar horario de trabajo del estilista
+                    if (estilista.working_hours) {
+                        try {
+                            const workingHours = typeof estilista.working_hours === 'string'
+                                ? JSON.parse(estilista.working_hours)
+                                : estilista.working_hours;
+
+                            const dayOfWeek = new Date(startTime).getDay(); // 0=domingo, 1=lunes...
+                            const dayNames = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+                            const dayKey = dayNames[dayOfWeek];
+                            const horaNum = parseInt(hora.split(':')[0], 10);
+
+                            if (workingHours[dayKey]) {
+                                const { start, end } = workingHours[dayKey];
+                                const startWork = parseInt(start, 10);
+                                const endWork = parseInt(end, 10);
+
+                                if (horaNum < startWork || horaNum >= endWork) {
+                                    return {
+                                        success: false,
+                                        available: false,
+                                        servicio: servicio.name,
+                                        estilista: nombreEstilista,
+                                        message: `❌ ${nombreEstilista} no trabaja a las ${hora}. Su horario es de ${start}:00 a ${end}:00. ¿Quieres buscar otro estilista o cambiar la hora?`
+                                    };
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('⚠️ Error parseando working_hours:', e.message);
+                        }
+                    }
+
+                    // Ver si hay conflicto con otras citas
                     const conflictResult = await db.query(
                         `SELECT id FROM appointments 
                          WHERE tenant_id = $1 AND stylist_id = $2
@@ -459,7 +508,7 @@ async function executeFunction(functionName, args, tenantId, clientId) {
                             estilista: nombreEstilista,
                             fecha,
                             hora,
-                            message: `❌ ${nombreEstilista} no está disponible a las ${hora} el ${fecha} para ${servicio.name}. ¿Quieres que busque horarios alternativos o otro estilista?`
+                            message: `❌ ${nombreEstilista} ya tiene una cita a las ${hora} el ${fecha}. ¿Quieres que busque horarios alternativos o te sugiero otro estilista?`
                         };
                     }
 
@@ -489,9 +538,38 @@ async function executeFunction(functionName, args, tenantId, clientId) {
                         };
                     }
 
-                    // Buscar estilistas SIN conflicto a esa hora
+                    // Buscar estilistas SIN conflicto a esa hora Y que trabajen a esa hora
                     const availableStylists = [];
+                    const dayOfWeek = new Date(startTime).getDay();
+                    const dayNames = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+                    const dayKey = dayNames[dayOfWeek];
+                    const horaNum = parseInt(hora.split(':')[0], 10);
+
                     for (const stylist of stylistsResult.rows) {
+                        // Verificar horario de trabajo
+                        if (stylist.working_hours) {
+                            try {
+                                const workingHours = typeof stylist.working_hours === 'string'
+                                    ? JSON.parse(stylist.working_hours)
+                                    : stylist.working_hours;
+
+                                if (workingHours[dayKey]) {
+                                    const { start, end } = workingHours[dayKey];
+                                    const startWork = parseInt(start, 10);
+                                    const endWork = parseInt(end, 10);
+
+                                    // Si no trabaja a esa hora, saltar
+                                    if (horaNum < startWork || horaNum >= endWork) {
+                                        console.log(`   ⏰ ${stylist.first_name} no trabaja a las ${hora} (horario: ${start}-${end})`);
+                                        continue;
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn('⚠️ Error parseando working_hours:', e.message);
+                            }
+                        }
+
+                        // Verificar conflicto de citas
                         const conflictResult = await db.query(
                             `SELECT id FROM appointments 
                              WHERE tenant_id = $1 AND stylist_id = $2
