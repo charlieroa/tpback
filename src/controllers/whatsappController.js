@@ -1043,6 +1043,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     `SELECT u.id, u.first_name, u.last_name FROM users u
                      INNER JOIN stylist_services ss ON u.id = ss.user_id
                      WHERE u.tenant_id = $1 AND ss.service_id = $2 AND u.role_id = 3
+                     AND COALESCE(u.status, 'active') = 'active'
                      ${stylistCondition} LIMIT 1`,
                     queryParams
                 );
@@ -1055,6 +1056,17 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 const nombreEstilista = `${estilista.first_name} ${estilista.last_name || ''}`.trim();
 
                 if (hora) {
+                    // Validar que la hora no sea en el pasado si es hoy
+                    const nowInBogota = formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd HH:mm');
+                    const [todayDate, nowTime] = nowInBogota.split(' ');
+
+                    if (fecha === todayDate && hora < nowTime) {
+                        return {
+                            success: false,
+                            message: `⏰ Las ${hora} ya pasaron. Son las ${nowTime.slice(0, 5)}. ¿A qué hora te gustaría?`
+                        };
+                    }
+
                     const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
                     const endTime = new Date(startTime.getTime() + servicio.duration_minutes * 60000);
 
@@ -1156,6 +1168,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     `SELECT u.id, u.first_name, u.last_name FROM users u
                      INNER JOIN stylist_services ss ON u.id = ss.user_id
                      WHERE u.tenant_id = $1 AND ss.service_id = $2 AND u.role_id = 3
+                     AND COALESCE(u.status, 'active') = 'active'
                      ${stylistCondition} LIMIT 1`,
                     queryParams
                 );
@@ -1167,6 +1180,18 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
 
                 const estilista = stylistResult.rows[0];
                 const nombreEstilista = `${estilista.first_name} ${estilista.last_name || ''}`.trim();
+
+                // Validar que la hora no sea en el pasado si es hoy
+                const nowInBogota = formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd HH:mm');
+                const [todayDate, nowTime] = nowInBogota.split(' ');
+
+                if (fecha === todayDate && hora < nowTime) {
+                    return {
+                        success: false,
+                        message: `⏰ Las ${hora} ya pasaron. Son las ${nowTime.slice(0, 5)}. ¿A qué hora te gustaría agendar?`
+                    };
+                }
+
                 const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
                 const endTime = new Date(startTime.getTime() + servicio.duration_minutes * 60000);
 
