@@ -408,18 +408,7 @@ exports.handleWahaWebhook = async (req, res) => {
             const cacheKey = `${tenantId}:${chatId}`;
             let conversationHistory = conversationCache.get(cacheKey) || [];
 
-            // Buscar cliente por número de teléfono (en tabla users con role_id=4)
-            // phoneNumber ya está definido arriba
-            let clientId = null;
-            try {
-                const clientResult = await db.query(
-                    `SELECT id FROM users WHERE tenant_id = $1 AND role_id = 4 AND phone LIKE $2 LIMIT 1`,
-                    [tenantId, `%${phoneNumber.slice(-10)}%`]
-                );
-                clientId = clientResult.rows[0]?.id || null;
-            } catch (clientLookupError) {
-                console.log('⚠️ [WEBHOOK] No se pudo buscar cliente:', clientLookupError.message);
-            }
+            // clientId ya está definido arriba en el flujo simplificado
 
             try {
                 // Procesar con IA (pasamos nombre y teléfono del cliente de WAHA)
