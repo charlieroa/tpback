@@ -1138,19 +1138,20 @@ exports.handleCheckout = async (req, res) => {
     // Actualizar tracking global del estilista
     await db.query('UPDATE users SET last_service_at = NOW() WHERE id = $1', [stylist_id]);
 
-    // 🎯 DIGITURNO: Actualizar posición en cola del servicio específico
+    // 🎯 DIGITURNO: Actualizar posición en cola de TODOS los servicios del estilista
+    // Cuando un estilista completa cualquier cita, pasa al final de TODAS sus colas
     await db.query(
       `UPDATE stylist_services 
        SET last_completed_at = NOW(),
            total_completed = COALESCE(total_completed, 0) + 1
-       WHERE user_id = $1 AND service_id = $2`,
-      [stylist_id, service_id]
+       WHERE user_id = $1`,
+      [stylist_id]
     );
 
     console.log(`🎯 [DIGITURNO] Cola actualizada:`);
     console.log(`   Estilista: ${stylist_id.substring(0, 8)}...`);
-    console.log(`   Servicio: ${service_id.substring(0, 8)}...`);
-    console.log(`   ✅ Movido al final de la cola para este servicio`);
+    console.log(`   Servicio completado: ${service_id.substring(0, 8)}...`);
+    console.log(`   ✅ Movido al final de TODAS sus colas de servicios`);
 
     await db.query('COMMIT');
     return res.status(200).json(appointmentResult.rows[0]);
