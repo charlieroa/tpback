@@ -1026,17 +1026,26 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantId]);
                 const tenantWH = tenantResult.rows[0]?.working_hours || {};
 
-                // Calcular día de la semana
-                const fechaDate = new Date(fecha);
+                // Calcular día de la semana (añadiendo T00:00:00 para evitar problemas de timezone)
+                const [year, month, day] = fecha.split('-').map(Number);
+                const fechaDate = new Date(year, month - 1, day);
                 const diasSemana = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
                 const dayName = diasSemana[fechaDate.getDay()];
+                console.log(`   📅 [DEBUG horarios] fecha=${fecha}, dayName=${dayName}`);
 
-                // Obtener rango de horas del estilista o del tenant
-                const stylistWH = stylist.working_hours || tenantWH;
-                const daySchedule = stylistWH[dayName];
+                // Obtener rango de horas: primero del estilista, luego del tenant
+                let daySchedule = null;
+                const stylistWH = stylist.working_hours;
+
+                if (stylistWH && stylistWH[dayName] && stylistWH[dayName].start) {
+                    daySchedule = stylistWH[dayName];
+                } else if (tenantWH && tenantWH[dayName] && tenantWH[dayName].start) {
+                    daySchedule = tenantWH[dayName];
+                }
 
                 if (!daySchedule || !daySchedule.start) {
-                    return { success: false, message: `${nombreEstilista} no trabaja ese día.` };
+                    console.log(`   ⚠️ [DEBUG horarios] No hay horario para ${dayName}. stylistWH:`, stylistWH, 'tenantWH:', tenantWH);
+                    return { success: false, message: `${nombreEstilista} no trabaja el ${dayName === 'saturday' ? 'sábado' : dayName === 'sunday' ? 'domingo' : dayName}. ¿Quieres otro día?` };
                 }
 
                 // Obtener citas existentes para ese día
