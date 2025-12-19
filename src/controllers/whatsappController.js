@@ -212,19 +212,21 @@ exports.handleWahaWebhook = async (req, res) => {
             }
 
             try {
-                // Buscar si ya existe el cliente
+                // Buscar si ya existe el cliente - SOLO para obtener el ID
                 const existingClient = await db.query(
-                    `SELECT id, first_name FROM users 
+                    `SELECT id FROM users 
                      WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
                     [tenantId, phoneNumber]
                 );
 
                 if (existingClient.rows.length > 0) {
                     clientId = existingClient.rows[0].id;
-                    // Si tiene nombre guardado válido, usarlo; sino usar notifyName
-                    const savedName = existingClient.rows[0].first_name;
-                    if (savedName && savedName.length >= 2 && !/^\d+$/.test(savedName) && savedName !== 'Cliente') {
-                        senderName = savedName;
+                    // Actualizar el nombre con el de WhatsApp si es válido
+                    if (senderName !== 'Cliente') {
+                        await db.query(
+                            `UPDATE users SET first_name = $1, updated_at = NOW() WHERE id = $2`,
+                            [senderName, clientId]
+                        );
                     }
                 } else {
                     // Crear cliente nuevo con el nombre de WhatsApp
