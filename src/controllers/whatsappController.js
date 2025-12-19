@@ -1033,20 +1033,38 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 const dayName = diasSemana[fechaDate.getDay()];
                 console.log(`   📅 [DEBUG horarios] fecha=${fecha}, dayName=${dayName}`);
 
+                // Helper para parsear horarios en diferentes formatos
+                const parseSchedule = (schedule) => {
+                    if (!schedule) return null;
+                    // Formato objeto: { start: '07:00', end: '20:00' }
+                    if (typeof schedule === 'object' && schedule.start) {
+                        return schedule;
+                    }
+                    // Formato string: '07:00-20:00'
+                    if (typeof schedule === 'string' && schedule.includes('-')) {
+                        const [start, end] = schedule.split('-');
+                        return { start, end };
+                    }
+                    return null;
+                };
+
                 // Obtener rango de horas: primero del estilista, luego del tenant
                 let daySchedule = null;
                 const stylistWH = stylist.working_hours;
 
-                if (stylistWH && stylistWH[dayName] && stylistWH[dayName].start) {
-                    daySchedule = stylistWH[dayName];
-                } else if (tenantWH && tenantWH[dayName] && tenantWH[dayName].start) {
-                    daySchedule = tenantWH[dayName];
+                if (stylistWH && stylistWH[dayName]) {
+                    daySchedule = parseSchedule(stylistWH[dayName]);
+                }
+                if (!daySchedule && tenantWH && tenantWH[dayName]) {
+                    daySchedule = parseSchedule(tenantWH[dayName]);
                 }
 
                 if (!daySchedule || !daySchedule.start) {
                     console.log(`   ⚠️ [DEBUG horarios] No hay horario para ${dayName}. stylistWH:`, stylistWH, 'tenantWH:', tenantWH);
                     return { success: false, message: `${nombreEstilista} no trabaja el ${dayName === 'saturday' ? 'sábado' : dayName === 'sunday' ? 'domingo' : dayName}. ¿Quieres otro día?` };
                 }
+
+                console.log(`   ✅ [DEBUG horarios] Horario encontrado: ${daySchedule.start} - ${daySchedule.end}`);
 
                 // Obtener citas existentes para ese día
                 const existingAppts = await db.query(
