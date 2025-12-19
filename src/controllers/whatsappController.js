@@ -201,35 +201,39 @@ exports.handleWahaWebhook = async (req, res) => {
             console.log(`   📋 [PAYLOAD DEBUG] notifyName: "${notifyName}" | payload.notifyName: "${payload.notifyName}" | pushName: "${payload.pushName}"`);
 
             // ==========================================
-            // FLUJO SIMPLIFICADO: Usar notifyName de WhatsApp automáticamente
-            // El nombre solo se pide al momento de confirmar una cita
+            // FLUJO DE NOMBRE: Pedir nombre si no existe uno válido
             // ==========================================
             let clientId = null;
-            // Solo usar notifyName si es un nombre válido (no vacío, no solo números, no igual al mensaje)
-            let senderName = 'Cliente';
-            if (notifyName && notifyName.length >= 2 && !/^\d+$/.test(notifyName) && notifyName.toLowerCase() !== userMessage?.toLowerCase()) {
-                senderName = notifyName;
-            }
+            let senderName = notifyName || 'Cliente';
+            let hasValidSavedName = false;
 
             try {
-                // Buscar si ya existe el cliente - SOLO para obtener el ID
+                // Buscar si ya existe el cliente
                 const existingClient = await db.query(
-                    `SELECT id FROM users 
+                    `SELECT id, first_name, last_name FROM users 
                      WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
                     [tenantId, phoneNumber]
                 );
 
                 if (existingClient.rows.length > 0) {
                     clientId = existingClient.rows[0].id;
-                    // Actualizar el nombre con el de WhatsApp si es válido
-                    if (senderName !== 'Cliente') {
-                        await db.query(
-                            `UPDATE users SET first_name = $1, updated_at = NOW() WHERE id = $2`,
-                            [senderName, clientId]
-                        );
+                    const savedFirstName = existingClient.rows[0].first_name;
+                    const savedLastName = existingClient.rows[0].last_name;
+
+                    // Verificar si el nombre guardado es válido
+                    const invalidNames = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
+                    if (savedFirstName &&
+                        savedFirstName.length >= 2 &&
+                        !/^\d+$/.test(savedFirstName) &&
+                        !invalidNames.includes(savedFirstName.toLowerCase()) &&
+                        savedLastName && savedLastName.length >= 2) {
+                        // Tiene nombre y apellido válidos - USAR SIEMPRE
+                        senderName = `${savedFirstName} ${savedLastName}`.trim();
+                        hasValidSavedName = true;
+                        console.log(`   ✅ [NOMBRE] Usando nombre guardado: ${senderName}`);
                     }
                 } else {
-                    // Crear cliente nuevo con el nombre de WhatsApp
+                    // Crear cliente nuevo con nombre temporal (notifyName)
                     try {
                         const newClient = await db.query(
                             `INSERT INTO users (tenant_id, role_id, first_name, phone, email, password_hash)
@@ -239,10 +243,9 @@ exports.handleWahaWebhook = async (req, res) => {
                         );
                         if (newClient.rows.length > 0) {
                             clientId = newClient.rows[0].id;
-                            console.log(`   ✅ [CLIENTE] Nuevo cliente creado: ${senderName} (${phoneNumber})`);
+                            console.log(`   🆕 [CLIENTE] Nuevo cliente: ${senderName} (${phoneNumber})`);
                         }
                     } catch (insertError) {
-                        // Si falla por duplicado, buscar el cliente existente
                         if (insertError.code === '23505') {
                             const existing = await db.query(
                                 `SELECT id FROM users WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
@@ -257,7 +260,66 @@ exports.handleWahaWebhook = async (req, res) => {
                     }
                 }
 
-                // Marcar conversación activa (para no repetir bienvenida)
+                // === FLUJO DE CAPTURA DE NOMBRE Y APELLIDO ===
+
+                // Si estamos esperando el apellido
+                if (isAwaitingLastName(chatId)) {
+                    const lastName = (userMessage || '').trim();
+                    const firstName = getTempFirstName(chatId);
+
+                    if (lastName.length >= 2 && !/^\d+$/.test(lastName)) {
+                        // Guardar nombre y apellido
+                        await db.query(
+                            `UPDATE users SET first_name = $1, last_name = $2, updated_at = NOW() WHERE id = $3`,
+                            [firstName, lastName, clientId]
+                        );
+                        senderName = `${firstName} ${lastName}`;
+                        setAwaitingLastName(chatId, false);
+
+                        console.log(`   ✅ [NOMBRE] Guardado: ${senderName}`);
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `¡Mucho gusto, ${firstName}! 😊\n\n¿En qué te puedo ayudar hoy?\n• Ver servicios disponibles\n• Agendar una cita\n• Consultar horarios`
+                        );
+                        return res.status(200).send('OK');
+                    } else {
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `Por favor, dime tu apellido (mínimo 2 letras) 😊`
+                        );
+                        return res.status(200).send('OK');
+                    }
+                }
+
+                // Si estamos esperando el nombre
+                if (isAwaitingName(chatId)) {
+                    const firstName = (userMessage || '').trim();
+                    const invalidNames = ['hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello', 'ok', 'si', 'no'];
+
+                    if (firstName.length >= 2 && !/^\d+$/.test(firstName) && !invalidNames.includes(firstName.toLowerCase())) {
+                        setAwaitingName(chatId, false);
+                        setAwaitingLastName(chatId, true, firstName);
+
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `¡Hola ${firstName}! 👋 ¿Y cuál es tu apellido?`
+                        );
+                        return res.status(200).send('OK');
+                    } else {
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `Por favor, dime tu nombre (mínimo 2 letras) 😊`
+                        );
+                        return res.status(200).send('OK');
+                    }
+                }
+
+                // Si NO tiene nombre válido guardado, pedir nombre
+                if (!hasValidSavedName && !isAwaitingName(chatId) && !isAwaitingLastName(chatId)) {
+                    setAwaitingName(chatId, true);
+                    await wahaService.sendMessage(chatId, tenantId,
+                        `¡Hola! 👋 Bienvenido a nuestro servicio.\n\nPara brindarte una mejor atención, ¿cuál es tu nombre?`
+                    );
+                    return res.status(200).send('OK');
+                }
+
+                // Marcar conversación activa
                 if (!conversationCache.has(chatId)) {
                     conversationCache.set(chatId, { lastInteraction: Date.now() });
                 }
