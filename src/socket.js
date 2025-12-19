@@ -23,8 +23,14 @@ function initSocket(server, allowedOrigins = []) {
     // El frontend hace: socket.emit("join:tenant", tenantId)
     socket.on("join:tenant", (tenantId) => {
       if (!tenantId) return;
-      socket.join(`tenant:${tenantId}`);
-      socket.emit("tenant:joined", { room: `tenant:${tenantId}` });
+      const roomName = `tenant:${tenantId}`;
+      socket.join(roomName);
+      console.log(`   🏠 [SOCKET] ${socket.id} unido a room: ${roomName}`);
+      socket.emit("tenant:joined", { room: roomName });
+
+      // Log de cuantos clientes hay en el room
+      const room = io.sockets.adapter.rooms.get(roomName);
+      console.log(`   👥 [SOCKET] Clientes en ${roomName}: ${room?.size || 0}`);
     });
 
     socket.on("disconnect", () => {

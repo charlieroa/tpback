@@ -733,12 +733,27 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
             'jueves': 4, 'viernes': 5, 'sabado': 6, 'sábado': 6
         };
 
+        // Verificar si dice "próximo" o "proximo" - significa la semana que viene
+        const isProximo = s.includes('próximo') || s.includes('proximo') || s.includes('siguiente');
+
         for (const [diaName, diaNum] of Object.entries(diasSemana)) {
             if (s.includes(diaName)) {
                 const todayNum = now.getDay();
                 let daysToAdd = diaNum - todayNum;
-                if (daysToAdd <= 0) daysToAdd += 7; // Si hoy es el día o ya pasó, ir al próximo
+
+                if (isProximo) {
+                    // "próximo martes" = siempre la semana que viene
+                    if (daysToAdd <= 0) daysToAdd += 7;
+                    daysToAdd += 7; // Agregar una semana más para "próximo"
+                    // Pero si ya es mayor a 7, no agregar (ej: hoy lunes, próximo viernes = viernes de esta semana + 7)
+                    if (daysToAdd > 13) daysToAdd -= 7;
+                } else {
+                    // Sin "próximo": si hoy es el día o ya pasó, ir al próximo
+                    if (daysToAdd <= 0) daysToAdd += 7;
+                }
+
                 const targetDate = new Date(now.getTime() + daysToAdd * 86400000);
+                console.log(`📅 [DATE] "${dateStr}" -> ${diaName} (${isProximo ? 'próximo' : 'este'}) = ${formatInTimeZone(targetDate, TIME_ZONE, 'yyyy-MM-dd')}`);
                 return formatInTimeZone(targetDate, TIME_ZONE, 'yyyy-MM-dd');
             }
         }
