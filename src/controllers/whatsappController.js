@@ -184,19 +184,32 @@ exports.handleWahaWebhook = async (req, res) => {
 
             const messageType = payload.type || payload._data?.type;
             const chatId = payload.from;
-            const notifyName = payload.notifyName || payload._data?.notifyName || '';
             let userMessage = payload.body;
             let isVoiceMessage = false;
 
             // Extraer número de teléfono
             const phoneNumber = chatId.split('@')[0];
 
+            // Extraer el nombre de display de WhatsApp (notifyName) - buscar en múltiples ubicaciones
+            let notifyName = payload.notifyName
+                || payload._data?.notifyName
+                || payload.pushName
+                || payload._data?.pushName
+                || '';
+
+            // Log para diagnóstico
+            console.log(`   📋 [PAYLOAD DEBUG] notifyName: "${notifyName}" | payload.notifyName: "${payload.notifyName}" | pushName: "${payload.pushName}"`);
+
             // ==========================================
             // FLUJO SIMPLIFICADO: Usar notifyName de WhatsApp automáticamente
             // El nombre solo se pide al momento de confirmar una cita
             // ==========================================
             let clientId = null;
-            let senderName = notifyName || 'Cliente';
+            // Solo usar notifyName si es un nombre válido (no vacío, no solo números, no igual al mensaje)
+            let senderName = 'Cliente';
+            if (notifyName && notifyName.length >= 2 && !/^\d+$/.test(notifyName) && notifyName.toLowerCase() !== userMessage?.toLowerCase()) {
+                senderName = notifyName;
+            }
 
             try {
                 // Buscar si ya existe el cliente
