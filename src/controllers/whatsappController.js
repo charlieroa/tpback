@@ -192,143 +192,65 @@ exports.handleWahaWebhook = async (req, res) => {
             const phoneNumber = chatId.split('@')[0];
 
             // ==========================================
-            // FLUJO DE NOMBRE: Verificar si ya tenemos el nombre del cliente
+            // FLUJO SIMPLIFICADO: Usar notifyName de WhatsApp automáticamente
+            // El nombre solo se pide al momento de confirmar una cita
             // ==========================================
+            let clientId = null;
+            let senderName = notifyName || 'Cliente';
+
             try {
+                // Buscar si ya existe el cliente
                 const existingClient = await db.query(
                     `SELECT id, first_name FROM users 
                      WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
                     [tenantId, phoneNumber]
                 );
 
-                let clientId = existingClient.rows.length > 0 ? existingClient.rows[0].id : null;
-                let clientName = existingClient.rows.length > 0 ? existingClient.rows[0].first_name : null;
-
-                // Verificar si necesitamos preguntar el nombre
-                // Nombre inválido: vacío, solo números, 'Cliente', o tiene emojis al inicio
-                const hasInvalidName = !clientName ||
-                    /^\d+$/.test(clientName) ||
-                    clientName === 'Cliente' ||
-                    clientName.length < 2;
-
-                // Si estamos esperando el apellido, procesar la respuesta
-                if (isAwaitingLastName(chatId)) {
-                    const lastName = (userMessage || '').trim();
-                    const firstName = getTempFirstName(chatId);
-
-                    // Validar que el apellido sea razonable (al menos 2 caracteres, no solo números)
-                    if (lastName.length >= 2 && !/^\d+$/.test(lastName)) {
-                        const fullName = `${firstName} ${lastName}`;
-
-                        if (clientId) {
-                            // Actualizar nombre y apellido existente
-                            await db.query(
-                                'UPDATE users SET first_name = $1, last_name = $2, updated_at = NOW() WHERE id = $3',
-                                [firstName, lastName, clientId]
-                            );
-                            console.log(`   ✅ [NOMBRE] Actualizado: ${fullName} para cliente ${clientId}`);
-                        } else {
-                            // Crear nuevo cliente con nombre y apellido
-                            const newClient = await db.query(
-                                `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                 VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
-                                 RETURNING id`,
-                                [tenantId, firstName, lastName, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                            );
-                            console.log(`   ✅ [NOMBRE] Cliente creado: ${fullName} con ID ${newClient.rows[0].id}`);
+                if (existingClient.rows.length > 0) {
+                    clientId = existingClient.rows[0].id;
+                    // Si tiene nombre guardado válido, usarlo; sino usar notifyName
+                    const savedName = existingClient.rows[0].first_name;
+                    if (savedName && savedName.length >= 2 && !/^\d+$/.test(savedName) && savedName !== 'Cliente') {
+                        senderName = savedName;
+                    }
+                } else {
+                    // Crear cliente nuevo con el nombre de WhatsApp
+                    try {
+                        const newClient = await db.query(
+                            `INSERT INTO users (tenant_id, role_id, first_name, phone, email, password_hash)
+                             VALUES ($1, 4, $2, $3, $4, 'whatsapp')
+                             RETURNING id`,
+                            [tenantId, senderName, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                        );
+                        if (newClient.rows.length > 0) {
+                            clientId = newClient.rows[0].id;
+                            console.log(`   ✅ [CLIENTE] Nuevo cliente creado: ${senderName} (${phoneNumber})`);
                         }
-
-                        setAwaitingLastName(chatId, false);
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `¡Mucho gusto, ${firstName}! 😊\n\n🎙️ Ahora puedes enviarme *notas de voz* o escribirme para agendar tu cita.\n\n¿En qué puedo ayudarte hoy?\n• Servicios disponibles\n• Agendar una cita\n• Horarios disponibles`
-                        );
-                        return res.status(200).send('OK');
-                    } else {
-                        // Apellido inválido, pedir de nuevo
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `Por favor, dime tu apellido (mínimo 2 letras) 😊`
-                        );
-                        return res.status(200).send('OK');
+                    } catch (insertError) {
+                        // Si falla por duplicado, buscar el cliente existente
+                        if (insertError.code === '23505') {
+                            const existing = await db.query(
+                                `SELECT id FROM users WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
+                                [tenantId, phoneNumber]
+                            );
+                            if (existing.rows.length > 0) {
+                                clientId = existing.rows[0].id;
+                            }
+                        } else {
+                            throw insertError;
+                        }
                     }
                 }
 
-                // Si estamos esperando el nombre, procesar la respuesta
-                if (isAwaitingName(chatId)) {
-                    const newName = (userMessage || '').trim();
-
-                    // Validar que el nombre sea razonable (al menos 2 caracteres, no solo números)
-                    if (newName.length >= 2 && !/^\d+$/.test(newName)) {
-                        // Guardar temporalmente el nombre y preguntar por el apellido
-                        setAwaitingName(chatId, false);
-                        setAwaitingLastName(chatId, true, newName);
-
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `¡Hola ${newName}! 👋 ¿Y cuál es tu apellido?`
-                        );
-                        return res.status(200).send('OK');
-                    } else {
-                        // Nombre inválido, pedir de nuevo
-                        await wahaService.sendMessage(chatId, tenantId,
-                            'Por favor, dime tu nombre (mínimo 2 letras) 😊'
-                        );
-                        return res.status(200).send('OK');
-                    }
+                // Marcar conversación activa (para no repetir bienvenida)
+                if (!conversationCache.has(chatId)) {
+                    conversationCache.set(chatId, { lastInteraction: Date.now() });
                 }
 
-                // Si estamos esperando confirmación del nombre guardado
-                if (isAwaitingNameConfirm(chatId)) {
-                    const respuesta = (userMessage || '').toLowerCase().trim();
-                    const savedName = getSavedNameToConfirm(chatId);
+                console.log(`   👤 Cliente: ${senderName} | ID: ${clientId || 'nuevo'}`);
 
-                    // Si dice "sí", "si", "ok", "está bien", "así está bien", usar el nombre guardado
-                    const afirmativas = ['si', 'sí', 'ok', 'bien', 'esta bien', 'está bien', 'asi', 'así', 'correcto', 'listo', 'dale', 'va'];
-                    const esAfirmativo = afirmativas.some(a => respuesta.includes(a));
-
-                    if (esAfirmativo) {
-                        setAwaitingNameConfirm(chatId, false);
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `¡Perfecto, ${savedName}! 😊\n\n🎙️ Puedes escribirme o enviarme notas de voz.\n\n¿En qué puedo ayudarte hoy?\n• Servicios disponibles\n• Agendar una cita\n• Horarios disponibles`
-                        );
-                        return res.status(200).send('OK');
-                    } else {
-                        // Quiere cambiar su nombre, pedir uno nuevo
-                        setAwaitingNameConfirm(chatId, false);
-                        setAwaitingName(chatId, true);
-                        await wahaService.sendMessage(chatId, tenantId,
-                            '¿Cómo te gustaría que te llamemos? 😊'
-                        );
-                        return res.status(200).send('OK');
-                    }
-                }
-
-                // Si no tiene nombre válido y no estamos esperando, preguntar
-                if (hasInvalidName && !isAwaitingName(chatId)) {
-                    setAwaitingName(chatId, true);
-                    await wahaService.sendMessage(chatId, tenantId,
-                        '¡Hola! 👋 Bienvenido a nuestro servicio de agendamiento.\n\nPara brindarte una mejor atención, ¿cómo te gustaría que te llamemos?'
-                    );
-                    return res.status(200).send('OK');
-                }
-
-                // Si tiene nombre pero es la primera interacción de la sesión, preguntar si quiere cambiar
-                // Usamos conversationCache para detectar si es primera vez en esta "sesión"
-                if (clientName && !conversationCache.has(chatId)) {
-                    // Marcar que ya preguntamos en esta sesión
-                    conversationCache.set(chatId, { askedNameConfirm: true, lastInteraction: Date.now() });
-                    setAwaitingNameConfirm(chatId, true, clientName);
-
-                    await wahaService.sendMessage(chatId, tenantId,
-                        `¡Hola! 👋 Te tengo guardado como *${clientName}*.\n\n¿Te llamo así o prefieres que te llame de otra forma?`
-                    );
-                    return res.status(200).send('OK');
-                }
-
-                // Usar el nombre del cliente para el resto del flujo
-                var senderName = clientName || notifyName || 'Cliente';
-
-            } catch (nameError) {
-                console.error('   ⚠️ [NOMBRE] Error verificando cliente:', nameError.message);
-                var senderName = notifyName || 'Cliente';
+            } catch (clientError) {
+                console.error('   ⚠️ [CLIENTE] Error:', clientError.message);
             }
 
             // Manejar notas de voz (ptt = push-to-talk)
