@@ -452,8 +452,14 @@ ESTILO:
             type: "function",
             function: {
                 name: "listar_estilistas",
-                description: "Lista los estilistas disponibles",
-                parameters: { type: "object", properties: {}, required: [] }
+                description: "Lista los estilistas que pueden atender un servicio específico",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        servicio: { type: "string", description: "Nombre del servicio para filtrar estilistas que lo ofrecen (opcional)" }
+                    },
+                    required: []
+                }
             }
         },
         {
@@ -513,6 +519,25 @@ ESTILO:
                         }
                     },
                     required: ["servicio", "fecha", "hora"]
+                }
+            }
+        },
+        {
+            type: "function",
+            function: {
+                name: "listar_horarios_disponibles",
+                description: "Lista los horarios disponibles de un estilista para una fecha específica",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        estilista: { type: "string", description: "Nombre del estilista" },
+                        fecha: {
+                            type: "string",
+                            description: "Fecha deseada: 'hoy', 'mañana', 'sábado', etc. NO convertir a ISO."
+                        },
+                        servicio: { type: "string", description: "Nombre del servicio (opcional, para calcular duración)" }
+                    },
+                    required: ["estilista", "fecha"]
                 }
             }
         }
@@ -700,13 +725,52 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
             }
 
             case 'listar_estilistas': {
-                const result = await db.query(
-                    `SELECT first_name, last_name FROM users 
-                     WHERE tenant_id = $1 AND role_id = 3 AND COALESCE(NULLIF(status,''),'active') = 'active'`,
-                    [tenantId]
-                );
-                const nombres = result.rows.map(u => `${u.first_name} ${u.last_name || ''}`.trim());
-                return { success: true, estilistas: nombres, message: `Estilistas: ${nombres.join(', ')}` };
+                let result;
+                if (args.servicio) {
+                    // Buscar servicio primero
+                    const svcResult = await db.query(
+                        `SELECT id, name FROM services WHERE tenant_id = $1 AND LOWER(name) LIKE $2 LIMIT 1`,
+                        [tenantId, `%${args.servicio.toLowerCase()}%`]
+                    );
+
+                    if (svcResult.rows.length === 0) {
+                        return { success: false, message: `No encontré el servicio "${args.servicio}"` };
+                    }
+
+                    const servicioId = svcResult.rows[0].id;
+                    const servicioName = svcResult.rows[0].name;
+
+                    // Buscar estilistas que ofrecen este servicio
+                    result = await db.query(
+                        `SELECT u.first_name, u.last_name FROM users u
+                         INNER JOIN stylist_services ss ON u.id = ss.user_id
+                         WHERE u.tenant_id = $1 AND u.role_id = 3 
+                         AND COALESCE(NULLIF(u.status,''),'active') = 'active'
+                         AND ss.service_id = $2`,
+                        [tenantId, servicioId]
+                    );
+
+                    if (result.rows.length === 0) {
+                        return { success: false, message: `No hay estilistas que ofrezcan ${servicioName}` };
+                    }
+
+                    const nombres = result.rows.map(u => `${u.first_name} ${u.last_name || ''}`.trim());
+                    return {
+                        success: true,
+                        estilistas: nombres,
+                        servicio: servicioName,
+                        message: `Estilistas que ofrecen ${servicioName}: ${nombres.join(', ')}`
+                    };
+                } else {
+                    // Sin servicio, listar todos
+                    result = await db.query(
+                        `SELECT first_name, last_name FROM users 
+                         WHERE tenant_id = $1 AND role_id = 3 AND COALESCE(NULLIF(status,''),'active') = 'active'`,
+                        [tenantId]
+                    );
+                    const nombres = result.rows.map(u => `${u.first_name} ${u.last_name || ''}`.trim());
+                    return { success: true, estilistas: nombres, message: `Estilistas: ${nombres.join(', ')}` };
+                }
             }
 
             case 'obtener_servicios_estilista': {
@@ -923,6 +987,112 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 return {
                     success: true,
                     message: `🎉 ¡Cita agendada!\n📅 ${fecha} a las ${hora}\n💇 ${servicio.name}\n👤 ${nombreEstilista}\n\n¡Te esperamos!`
+                };
+            }
+
+            case 'listar_horarios_disponibles': {
+                const fecha = normalizeDateKeyword(args.fecha);
+                console.log(`   📅 [DEBUG horarios] fecha: "${args.fecha}" -> "${fecha}"`);
+
+                // Buscar estilista
+                const stylistResult = await db.query(
+                    `SELECT id, first_name, last_name, working_hours FROM users 
+                     WHERE tenant_id = $1 AND role_id = 3 
+                     AND (LOWER(first_name) LIKE $2 OR LOWER(CONCAT(first_name, ' ', last_name)) LIKE $2)
+                     LIMIT 1`,
+                    [tenantId, `%${(args.estilista || '').toLowerCase()}%`]
+                );
+
+                if (stylistResult.rows.length === 0) {
+                    return { success: false, message: `No encontré al estilista "${args.estilista}"` };
+                }
+
+                const stylist = stylistResult.rows[0];
+                const nombreEstilista = `${stylist.first_name} ${stylist.last_name || ''}`.trim();
+
+                // Obtener duración del servicio (si se proporciona) o usar 60 min por defecto
+                let duracion = 60;
+                if (args.servicio) {
+                    const svcResult = await db.query(
+                        `SELECT duration_minutes FROM services WHERE tenant_id = $1 AND LOWER(name) LIKE $2 LIMIT 1`,
+                        [tenantId, `%${args.servicio.toLowerCase()}%`]
+                    );
+                    if (svcResult.rows.length > 0) {
+                        duracion = svcResult.rows[0].duration_minutes || 60;
+                    }
+                }
+
+                // Obtener horarios del tenant
+                const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantId]);
+                const tenantWH = tenantResult.rows[0]?.working_hours || {};
+
+                // Calcular día de la semana
+                const fechaDate = new Date(fecha);
+                const diasSemana = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+                const dayName = diasSemana[fechaDate.getDay()];
+
+                // Obtener rango de horas del estilista o del tenant
+                const stylistWH = stylist.working_hours || tenantWH;
+                const daySchedule = stylistWH[dayName];
+
+                if (!daySchedule || !daySchedule.start) {
+                    return { success: false, message: `${nombreEstilista} no trabaja ese día.` };
+                }
+
+                // Obtener citas existentes para ese día
+                const existingAppts = await db.query(
+                    `SELECT start_time, end_time FROM appointments 
+                     WHERE stylist_id = $1 
+                     AND DATE(start_time AT TIME ZONE 'America/Bogota') = $2
+                     AND status IN ('scheduled','rescheduled','checked_in')`,
+                    [stylist.id, fecha]
+                );
+
+                // Generar slots disponibles
+                const [startHour, startMin] = daySchedule.start.split(':').map(Number);
+                const [endHour, endMin] = daySchedule.end.split(':').map(Number);
+                const slots = [];
+
+                for (let h = startHour; h < endHour || (h === endHour && 0 < endMin); h++) {
+                    for (let m = 0; m < 60; m += 30) {
+                        if (h === startHour && m < startMin) continue;
+                        if (h === endHour && m >= endMin) break;
+
+                        const slotTime = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+                        const slotStart = new Date(`${fecha}T${slotTime}:00`);
+                        const slotEnd = new Date(slotStart.getTime() + duracion * 60000);
+
+                        // Verificar si el slot está ocupado
+                        const isOccupied = existingAppts.rows.some(a => {
+                            const aStart = new Date(a.start_time);
+                            const aEnd = new Date(a.end_time);
+                            return slotStart < aEnd && slotEnd > aStart;
+                        });
+
+                        if (!isOccupied) {
+                            slots.push(slotTime);
+                        }
+                    }
+                }
+
+                if (slots.length === 0) {
+                    return { success: false, message: `${nombreEstilista} no tiene horarios disponibles para el ${fecha}` };
+                }
+
+                // Formatear horarios para mostrar
+                const horariosFormateados = slots.slice(0, 10).map(s => {
+                    const [h, m] = s.split(':').map(Number);
+                    const ampm = h >= 12 ? 'pm' : 'am';
+                    const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+                    return `${h12}:${String(m).padStart(2, '0')}${ampm}`;
+                });
+
+                return {
+                    success: true,
+                    estilista: nombreEstilista,
+                    fecha,
+                    horarios: slots,
+                    message: `Horarios disponibles de ${nombreEstilista} para el ${fecha}:\n${horariosFormateados.join(', ')}${slots.length > 10 ? ' (y más)' : ''}`
                 };
             }
 
