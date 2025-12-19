@@ -13,6 +13,11 @@ const conversationCache = new Map();
 // Cache para rastrear cuando estamos esperando el nombre del cliente
 const awaitingNameCache = new Map();
 
+// Cache para rastrear cuando estamos esperando el apellido del cliente
+const awaitingLastNameCache = new Map();
+// Cache para guardar temporalmente el nombre mientras esperamos el apellido
+const tempFirstNameCache = new Map();
+
 function isAwaitingName(chatId) {
     return awaitingNameCache.get(chatId) === true;
 }
@@ -23,6 +28,24 @@ function setAwaitingName(chatId, value) {
     } else {
         awaitingNameCache.delete(chatId);
     }
+}
+
+function isAwaitingLastName(chatId) {
+    return awaitingLastNameCache.get(chatId) === true;
+}
+
+function setAwaitingLastName(chatId, value, firstName = null) {
+    if (value) {
+        awaitingLastNameCache.set(chatId, true);
+        if (firstName) tempFirstNameCache.set(chatId, firstName);
+    } else {
+        awaitingLastNameCache.delete(chatId);
+        tempFirstNameCache.delete(chatId);
+    }
+}
+
+function getTempFirstName(chatId) {
+    return tempFirstNameCache.get(chatId);
 }
 
 /* =================================================================== */
@@ -165,33 +188,59 @@ exports.handleWahaWebhook = async (req, res) => {
                     clientName === 'Cliente' ||
                     clientName.length < 2;
 
+                // Si estamos esperando el apellido, procesar la respuesta
+                if (isAwaitingLastName(chatId)) {
+                    const lastName = (userMessage || '').trim();
+                    const firstName = getTempFirstName(chatId);
+
+                    // Validar que el apellido sea razonable (al menos 2 caracteres, no solo números)
+                    if (lastName.length >= 2 && !/^\d+$/.test(lastName)) {
+                        const fullName = `${firstName} ${lastName}`;
+
+                        if (clientId) {
+                            // Actualizar nombre y apellido existente
+                            await db.query(
+                                'UPDATE users SET first_name = $1, last_name = $2, updated_at = NOW() WHERE id = $3',
+                                [firstName, lastName, clientId]
+                            );
+                            console.log(`   ✅ [NOMBRE] Actualizado: ${fullName} para cliente ${clientId}`);
+                        } else {
+                            // Crear nuevo cliente con nombre y apellido
+                            const newClient = await db.query(
+                                `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                 VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
+                                 RETURNING id`,
+                                [tenantId, firstName, lastName, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                            );
+                            console.log(`   ✅ [NOMBRE] Cliente creado: ${fullName} con ID ${newClient.rows[0].id}`);
+                        }
+
+                        setAwaitingLastName(chatId, false);
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `¡Mucho gusto, ${firstName}! 😊\n\n🎙️ Ahora puedes enviarme *notas de voz* o escribirme para agendar tu cita.\n\n¿En qué puedo ayudarte hoy?\n• Servicios disponibles\n• Agendar una cita\n• Horarios disponibles`
+                        );
+                        return res.status(200).send('OK');
+                    } else {
+                        // Apellido inválido, pedir de nuevo
+                        await wahaService.sendMessage(chatId, tenantId,
+                            `Por favor, dime tu apellido (mínimo 2 letras) 😊`
+                        );
+                        return res.status(200).send('OK');
+                    }
+                }
+
                 // Si estamos esperando el nombre, procesar la respuesta
                 if (isAwaitingName(chatId)) {
                     const newName = (userMessage || '').trim();
 
                     // Validar que el nombre sea razonable (al menos 2 caracteres, no solo números)
                     if (newName.length >= 2 && !/^\d+$/.test(newName)) {
-                        if (clientId) {
-                            // Actualizar nombre existente
-                            await db.query(
-                                'UPDATE users SET first_name = $1, updated_at = NOW() WHERE id = $2',
-                                [newName, clientId]
-                            );
-                            console.log(`   ✅ [NOMBRE] Actualizado: ${newName} para cliente ${clientId}`);
-                        } else {
-                            // Crear nuevo cliente
-                            const newClient = await db.query(
-                                `INSERT INTO users (tenant_id, role_id, first_name, phone, email, password_hash)
-                                 VALUES ($1, 4, $2, $3, $4, 'whatsapp')
-                                 RETURNING id`,
-                                [tenantId, newName, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                            );
-                            console.log(`   ✅ [NOMBRE] Cliente creado: ${newName} con ID ${newClient.rows[0].id}`);
-                        }
-
+                        // Guardar temporalmente el nombre y preguntar por el apellido
                         setAwaitingName(chatId, false);
+                        setAwaitingLastName(chatId, true, newName);
+
                         await wahaService.sendMessage(chatId, tenantId,
-                            `¡Mucho gusto, ${newName}! 😊 ¿En qué puedo ayudarte hoy?\n\nPuedes preguntarme por:\n• Servicios disponibles\n• Agendar una cita\n• Horarios disponibles`
+                            `¡Hola ${newName}! 👋 ¿Y cuál es tu apellido?`
                         );
                         return res.status(200).send('OK');
                     } else {

@@ -122,17 +122,30 @@ FLUJO DE AGENDAMIENTO:
 2. Si el cliente menciona un SERVICIO → usa verificar_disponibilidad
 3. Solo usa agendar_cita cuando tengas TODOS los datos confirmados: servicio, estilista, fecha y hora
 
-REGLAS IMPORTANTES:
+⚠️ REGLAS CRÍTICAS SOBRE SERVICIOS:
+- NUNCA inventes servicios que no existan. Solo puedes ofrecer los servicios que te devuelvan las funciones.
+- Si el usuario pide algo como "corte corto", "corte moderno", etc., NO lo conviertas en otro servicio.
+- Si no encuentras un servicio exacto, usa listar_servicios para mostrar las opciones disponibles.
+- Solo menciona servicios EXACTOS de la base de datos.
+
+REGLAS SOBRE ESTILISTAS Y HORARIOS:
+- Si el cliente pide una HORA ESPECÍFICA (ej: "a las 4pm") y NO menciona estilista → sugiere SOLO estilistas disponibles a esa hora
 - Si el cliente dice "agendar con Carlos" sin servicio → primero averigua qué servicios ofrece Carlos
-- Si el cliente dice "corte mañana 2pm" sin estilista → busca cualquier estilista disponible
+- Si el cliente dice "corte mañana 2pm" sin estilista → busca estilistas disponibles A ESA HORA
+- Las citas de HOY son válidas para cualquier horario FUTURO (no pasado)
 - Si no hay disponibilidad en un horario → sugiere horarios alternativos
-- Las fechas "hoy" y "mañana" son válidas
+
+REGLAS DE FECHAS Y HORAS:
+- "hoy" es válido para citas en horarios FUTUROS del día actual
+- "mañana" siempre es válido
 - Los horarios pueden ser "2pm", "14:00", "10 de la mañana", etc.
+- Si el horario ya pasó hoy, sugiere uno más tarde o para mañana
 
 FORMATO:
 - Usa emojis para ser amigable 💇✂️📅
 - Mantén respuestas cortas y claras
-- Presenta opciones como lista cuando haya varias`;
+- Presenta opciones como lista cuando haya varias
+- NUNCA menciones servicios que no existan en la base de datos`;
 
 
 // ==================== HELPERS ====================
@@ -459,6 +472,76 @@ async function executeFunction(functionName, args, tenantId, clientId) {
                         hora,
                         duracion: servicio.duration_minutes,
                         message: `✅ ¡Hay disponibilidad! ${nombreEstilista} puede atenderte el ${fecha} a las ${hora} para ${servicio.name} (${servicio.duration_minutes} min). ¿Quieres que agende la cita?`
+                    };
+                }
+
+                // Si hay hora pero no estilista específico, filtrar por disponibilidad a esa hora
+                if (hora && !args.estilista) {
+                    const startTime = makeLocalUtc(fecha, hora);
+                    const endTime = new Date(startTime.getTime() + (servicio.duration_minutes || 60) * 60000);
+
+                    // Verificar que la hora no sea pasada (para citas de hoy)
+                    const now = new Date();
+                    if (startTime < now) {
+                        return {
+                            success: false,
+                            message: `⏰ Ese horario (${hora}) ya pasó. ¿Te gustaría agendar para más tarde hoy o para mañana?`
+                        };
+                    }
+
+                    // Buscar estilistas SIN conflicto a esa hora
+                    const availableStylists = [];
+                    for (const stylist of stylistsResult.rows) {
+                        const conflictResult = await db.query(
+                            `SELECT id FROM appointments 
+                             WHERE tenant_id = $1 AND stylist_id = $2
+                               AND status IN ('scheduled', 'rescheduled', 'checked_in')
+                               AND (start_time, end_time) OVERLAPS ($3::timestamptz, $4::timestamptz)
+                             LIMIT 1`,
+                            [tenantId, stylist.id, startTime, endTime]
+                        );
+
+                        if (conflictResult.rows.length === 0) {
+                            availableStylists.push({
+                                id: stylist.id,
+                                name: `${stylist.first_name} ${stylist.last_name || ''}`.trim()
+                            });
+                        }
+                    }
+
+                    if (availableStylists.length === 0) {
+                        return {
+                            success: true,
+                            available: false,
+                            servicio: servicio.name,
+                            fecha,
+                            hora,
+                            message: `❌ No hay estilistas disponibles para ${servicio.name} a las ${hora} el ${fecha}. ¿Quieres que busque horarios alternativos?`
+                        };
+                    }
+
+                    if (availableStylists.length === 1) {
+                        return {
+                            success: true,
+                            available: true,
+                            servicio: servicio.name,
+                            estilista: availableStylists[0].name,
+                            fecha,
+                            hora,
+                            duracion: servicio.duration_minutes,
+                            message: `✅ A las ${hora} está disponible ${availableStylists[0].name} para ${servicio.name}. ¿Quieres que agende la cita?`
+                        };
+                    }
+
+                    const nombresDisponibles = availableStylists.map(s => s.name).join(', ');
+                    return {
+                        success: true,
+                        available: true,
+                        servicio: servicio.name,
+                        fecha,
+                        hora,
+                        estilistas_disponibles: nombresDisponibles,
+                        message: `✅ A las ${hora} el ${fecha} para ${servicio.name} están disponibles: ${nombresDisponibles}. ¿Con cuál te gustaría agendar?`
                     };
                 }
 
