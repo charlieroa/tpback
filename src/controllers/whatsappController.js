@@ -3,6 +3,7 @@
 const db = require('../config/db');
 const wahaService = require('../services/wahaService');
 const { formatInTimeZone, zonedTimeToUtc } = require('date-fns-tz');
+const { getIO } = require('../socket');
 
 const TIME_ZONE = 'America/Bogota';
 
@@ -978,11 +979,33 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     };
                 }
 
-                await db.query(
+                const appointmentResult = await db.query(
                     `INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status)
-                     VALUES ($1, $2, $3, $4, $5, $6, 'scheduled')`,
+                     VALUES ($1, $2, $3, $4, $5, $6, 'scheduled')
+                     RETURNING id`,
                     [tenantId, finalClientId, estilista.id, servicio.id, startTime, endTime]
                 );
+
+                // 📡 Emitir evento WebSocket para actualizar calendario en tiempo real
+                try {
+                    const io = getIO();
+                    io.to(`tenant:${tenantId}`).emit('appointment:created', {
+                        id: appointmentResult.rows[0].id,
+                        clientId: finalClientId,
+                        clientName: senderName,
+                        stylistId: estilista.id,
+                        stylistName: nombreEstilista,
+                        serviceId: servicio.id,
+                        serviceName: servicio.name,
+                        startTime: startTime.toISOString(),
+                        endTime: endTime.toISOString(),
+                        status: 'scheduled',
+                        createdVia: 'whatsapp'
+                    });
+                    console.log(`   📡 [SOCKET] Evento appointment:created emitido para tenant ${tenantId}`);
+                } catch (socketErr) {
+                    console.log(`   ⚠️ [SOCKET] No se pudo emitir evento:`, socketErr.message);
+                }
 
                 return {
                     success: true,
