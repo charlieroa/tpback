@@ -2159,3 +2159,75 @@ exports.getDigiturnoQueue = async (req, res) => {
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 };
+
+/* =================================================================== */
+/* ==============   POLLING: CITAS RECIENTES   ======================= */
+/* =================================================================== */
+
+/**
+ * Obtiene las citas creadas en los últimos N minutos (para polling)
+ * GET /api/appointments/recent/:tenantId?minutes=5
+ */
+exports.getRecentAppointments = async (req, res) => {
+  try {
+    const { tenantId } = req.params;
+    const minutes = parseInt(req.query.minutes) || 5;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: 'tenantId requerido' });
+    }
+
+    console.log(`🔄 [POLLING] Consultando citas recientes para tenant ${tenantId} (últimos ${minutes} min)`);
+
+    const result = await db.query(
+      `SELECT 
+        a.id,
+        a.client_id,
+        c.first_name || ' ' || COALESCE(c.last_name, '') AS client_name,
+        a.stylist_id,
+        s.first_name || ' ' || COALESCE(s.last_name, '') AS stylist_name,
+        a.service_id,
+        svc.name AS service_name,
+        a.start_time,
+        a.end_time,
+        a.status,
+        a.created_at
+      FROM appointments a
+      LEFT JOIN users c ON a.client_id = c.id
+      LEFT JOIN users s ON a.stylist_id = s.id
+      LEFT JOIN services svc ON a.service_id = svc.id
+      WHERE a.tenant_id = $1
+        AND a.created_at >= NOW() - INTERVAL '${minutes} minutes'
+      ORDER BY a.created_at DESC
+      LIMIT 10`,
+      [tenantId]
+    );
+
+    const appointments = result.rows.map(row => ({
+      id: row.id,
+      clientId: row.client_id,
+      clientName: row.client_name?.trim() || 'Cliente',
+      stylistId: row.stylist_id,
+      stylistName: row.stylist_name?.trim() || 'Estilista',
+      serviceId: row.service_id,
+      serviceName: row.service_name || 'Servicio',
+      startTime: row.start_time,
+      endTime: row.end_time,
+      status: row.status,
+      createdAt: row.created_at,
+      createdVia: 'whatsapp' // Asumimos que las citas polling son de WhatsApp
+    }));
+
+    console.log(`✅ [POLLING] Encontradas ${appointments.length} citas recientes`);
+
+    return res.status(200).json({
+      tenant_id: tenantId,
+      timestamp: new Date().toISOString(),
+      appointments
+    });
+
+  } catch (error) {
+    console.error('❌ [POLLING] Error:', error);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};

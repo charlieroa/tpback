@@ -86,6 +86,9 @@ router.post('/schedule-with-fallback', authMiddleware, appointmentController.sch
 
 router.post('/', authMiddleware, appointmentController.createAppointment);
 
+// 🔄 POLLING: Citas recientes (para notificaciones en tiempo real)
+router.get('/recent/:tenantId', authMiddleware, appointmentController.getRecentAppointments);
+
 router.get('/tenant/:tenantId', authMiddleware, appointmentController.getAppointmentsByTenant);
 
 router.put('/:id', authMiddleware, appointmentController.updateAppointment);
