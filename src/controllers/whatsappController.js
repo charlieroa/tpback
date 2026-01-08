@@ -616,9 +616,21 @@ BIENVENIDA:
 FLUJO DE CONVERSACIÓN PARA AGENDAR:
 1. Si el cliente menciona estilista + servicio + fecha + hora de una vez → verifica disponibilidad directamente
 2. Si solo mencionan estilista sin servicio → consulta qué servicios ofrece
-3. Si mencionan servicio pero no estilista → verifica disponibilidad y sugiere un estilista
+3. Si mencionan servicio pero no estilista → verifica disponibilidad y sugiere estilistas disponibles
 4. SIEMPRE pide confirmación antes de agendar: "¿Confirmo tu cita de [servicio] con [estilista] el [fecha] a las [hora]?"
 5. Solo agenda cuando el cliente diga "sí", "confirma", "dale", etc.
+
+⚠️ REGLAS CRÍTICAS SOBRE SERVICIOS (MUY IMPORTANTE):
+- NUNCA menciones un servicio sin antes llamar a listar_servicios o verificar_disponibilidad
+- Si el cliente pide "corte", primero verifica que "corte" existe como servicio
+- NO inventes servicios como "corte moderno", "peinado especial", etc. - solo los que devuelven las funciones
+- Si el servicio no existe, usa listar_servicios y muestra las opciones
+- Si el cliente pide algo que NO existe, di: "Ese servicio no lo tenemos. Nuestros servicios son: [lista]"
+
+⚠️ REGLAS CRÍTICAS SOBRE DISPONIBILIDAD:
+- Si preguntan "¿quién me puede atender hoy/a las X?" → usa verificar_disponibilidad para ver quién TRABAJA ese día/hora
+- NO sugieras estilistas sin verificar primero que trabajan en esa fecha/hora
+- Si nadie está disponible a esa hora, sugiere otras horas o estilistas
 
 REGLAS IMPORTANTES:
 - Sé EXPLÍCITO: cuando listes servicios de un estilista, di claramente "Estos son los servicios de [nombre]"
@@ -918,6 +930,56 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
         return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
     };
 
+    // Helper: Verificar si un estilista trabaja en una fecha/hora específica
+    const checkStylistWorksAtTime = (stylistWorkingHours, fecha, hora) => {
+        if (!stylistWorkingHours) return true; // Si no tiene horario, asumir disponible
+
+        try {
+            const wh = typeof stylistWorkingHours === 'string'
+                ? JSON.parse(stylistWorkingHours)
+                : stylistWorkingHours;
+
+            // Obtener día de la semana
+            const [year, month, day] = fecha.split('-').map(Number);
+            const fechaDate = new Date(year, month - 1, day);
+            const dayNum = fechaDate.getDay();
+            const dayNames = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+            const dayNamesEn = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+            const dayKey = dayNames[dayNum];
+            const dayKeyEn = dayNamesEn[dayNum];
+
+            // Buscar en español o inglés
+            const schedule = wh[dayKey] || wh[dayKeyEn];
+            if (!schedule) return false; // No trabaja ese día
+
+            // Parsear horario
+            let startWork, endWork;
+            if (typeof schedule === 'object' && schedule.start) {
+                startWork = schedule.start.replace(':', '');
+                endWork = schedule.end.replace(':', '');
+            } else if (typeof schedule === 'string' && schedule.includes('-')) {
+                const [start, end] = schedule.split('-');
+                startWork = start.replace(':', '');
+                endWork = end.replace(':', '');
+            } else {
+                return true; // Formato no reconocido, asumir disponible
+            }
+
+            // Comparar hora solicitada
+            if (hora) {
+                const horaNum = hora.replace(':', '');
+                if (horaNum < startWork || horaNum >= endWork) {
+                    return false; // Fuera de horario
+                }
+            }
+
+            return true;
+        } catch (e) {
+            console.warn('⚠️ Error verificando working_hours:', e.message);
+            return true; // En caso de error, asumir disponible
+        }
+    };
+
     try {
         switch (functionName) {
             case 'listar_servicios': {
@@ -1031,7 +1093,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
 
                 const servicio = svcResult.rows[0];
 
-                // Buscar estilista
+                // Buscar TODOS los estilistas que ofrecen el servicio (con working_hours)
                 let queryParams = [tenantId, servicio.id];
                 let stylistCondition = '';
                 if (args.estilista) {
@@ -1040,23 +1102,35 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 }
 
                 const stylistsResult = await db.query(
-                    `SELECT u.id, u.first_name, u.last_name FROM users u
+                    `SELECT u.id, u.first_name, u.last_name, u.working_hours FROM users u
                      INNER JOIN stylist_services ss ON u.id = ss.user_id
                      WHERE u.tenant_id = $1 AND ss.service_id = $2 AND u.role_id = 3
                      AND COALESCE(u.status, 'active') = 'active'
-                     ${stylistCondition} LIMIT 1`,
+                     ${stylistCondition}`,
                     queryParams
                 );
 
                 if (stylistsResult.rows.length === 0) {
-                    return { success: false, message: `No hay estilistas disponibles para ${servicio.name}` };
+                    return { success: false, message: `No hay estilistas que ofrezcan ${servicio.name}` };
                 }
 
-                const estilista = stylistsResult.rows[0];
-                const nombreEstilista = `${estilista.first_name} ${estilista.last_name || ''}`.trim();
+                // Filtrar estilistas que trabajan en la fecha/hora solicitada
+                const estilistasQueTrabajan = stylistsResult.rows.filter(s =>
+                    checkStylistWorksAtTime(s.working_hours, fecha, hora)
+                );
 
+                console.log(`   👥 [DEBUG] Estilistas que trabajan el ${fecha}${hora ? ` a las ${hora}` : ''}: ${estilistasQueTrabajan.map(s => s.first_name).join(', ') || 'ninguno'}`);
+
+                if (estilistasQueTrabajan.length === 0) {
+                    const todosNombres = stylistsResult.rows.map(s => s.first_name).join(', ');
+                    return {
+                        success: false,
+                        message: `❌ Ningún estilista trabaja a esa hora. Los que ofrecen ${servicio.name} son: ${todosNombres}. ¿Quieres consultar sus horarios?`
+                    };
+                }
+
+                // Validar que la hora no sea en el pasado si es hoy
                 if (hora) {
-                    // Validar que la hora no sea en el pasado si es hoy
                     const nowInBogota = formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd HH:mm');
                     const [todayDate, nowTime] = nowInBogota.split(' ');
 
@@ -1070,39 +1144,67 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
                     const endTime = new Date(startTime.getTime() + servicio.duration_minutes * 60000);
 
-                    const conflict = await db.query(
-                        `SELECT id FROM appointments 
-                         WHERE tenant_id = $1 AND stylist_id = $2 
-                         AND status IN ('scheduled','rescheduled','checked_in')
-                         AND (start_time, end_time) OVERLAPS ($3::timestamptz, $4::timestamptz)`,
-                        [tenantId, estilista.id, startTime, endTime]
-                    );
+                    // Buscar estilistas SIN conflicto de citas
+                    const estilistasDisponibles = [];
+                    for (const stylist of estilistasQueTrabajan) {
+                        const conflict = await db.query(
+                            `SELECT id FROM appointments 
+                             WHERE tenant_id = $1 AND stylist_id = $2 
+                             AND status IN ('scheduled','rescheduled','checked_in')
+                             AND (start_time, end_time) OVERLAPS ($3::timestamptz, $4::timestamptz)`,
+                            [tenantId, stylist.id, startTime, endTime]
+                        );
 
-                    if (conflict.rows.length > 0) {
+                        if (conflict.rows.length === 0) {
+                            estilistasDisponibles.push({
+                                id: stylist.id,
+                                nombre: `${stylist.first_name} ${stylist.last_name || ''}`.trim()
+                            });
+                        }
+                    }
+
+                    if (estilistasDisponibles.length === 0) {
+                        const nombresQueTrabajan = estilistasQueTrabajan.map(s => s.first_name).join(', ');
                         return {
                             success: true,
                             available: false,
-                            message: `❌ ${nombreEstilista} no está disponible a las ${hora}. ¿Quieres otra hora?`
+                            message: `❌ Todos los estilistas que trabajan a esa hora (${nombresQueTrabajan}) ya tienen citas. ¿Quieres otra hora?`
                         };
                     }
 
+                    if (estilistasDisponibles.length === 1) {
+                        return {
+                            success: true,
+                            available: true,
+                            servicio: servicio.name,
+                            estilista: estilistasDisponibles[0].nombre,
+                            fecha,
+                            hora,
+                            message: `✅ ${estilistasDisponibles[0].nombre} está disponible el ${fecha} a las ${hora} para ${servicio.name}. ¿Confirmo la cita?`
+                        };
+                    }
+
+                    // Múltiples disponibles - listar
+                    const nombres = estilistasDisponibles.map(s => s.nombre).join(', ');
                     return {
                         success: true,
                         available: true,
                         servicio: servicio.name,
-                        estilista: nombreEstilista,
+                        estilistas_disponibles: nombres,
                         fecha,
                         hora,
-                        message: `✅ ${nombreEstilista} disponible el ${fecha} a las ${hora} para ${servicio.name}. ¿Confirmo la cita?`
+                        message: `✅ Para ${servicio.name} el ${fecha} a las ${hora} están disponibles: ${nombres}. ¿Con cuál prefieres?`
                     };
                 }
 
+                // Sin hora específica - listar estilistas que trabajan ese día
+                const nombres = estilistasQueTrabajan.map(s => `${s.first_name} ${s.last_name || ''}`.trim()).join(', ');
                 return {
                     success: true,
                     servicio: servicio.name,
-                    estilista: nombreEstilista,
+                    estilistas_disponibles: nombres,
                     fecha,
-                    message: `${nombreEstilista} puede atenderte para ${servicio.name} el ${fecha}. ¿A qué hora?`
+                    message: `Para ${servicio.name} el ${fecha} pueden atenderte: ${nombres}. ¿A qué hora te gustaría?`
                 };
             }
 
