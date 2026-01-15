@@ -220,15 +220,16 @@ exports.handleWahaWebhook = async (req, res) => {
                     const savedFirstName = existingClient.rows[0].first_name;
                     const savedLastName = existingClient.rows[0].last_name;
 
-                    // Verificar si el nombre guardado es válido
+                    // Verificar si el nombre guardado es válido (solo first_name requerido)
                     const invalidNames = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
                     if (savedFirstName &&
                         savedFirstName.length >= 2 &&
                         !/^\d+$/.test(savedFirstName) &&
-                        !invalidNames.includes(savedFirstName.toLowerCase()) &&
-                        savedLastName && savedLastName.length >= 2) {
-                        // Tiene nombre y apellido válidos - USAR SIEMPRE
-                        senderName = `${savedFirstName} ${savedLastName}`.trim();
+                        !invalidNames.includes(savedFirstName.toLowerCase())) {
+                        // Tiene nombre válido - apellido es opcional
+                        senderName = savedLastName && savedLastName.length >= 2
+                            ? `${savedFirstName} ${savedLastName}`.trim()
+                            : savedFirstName;
                         hasValidSavedName = true;
                         console.log(`   ✅ [NOMBRE] Usando nombre guardado: ${senderName}`);
                     }
@@ -260,68 +261,18 @@ exports.handleWahaWebhook = async (req, res) => {
                     }
                 }
 
-                // === FLUJO DE CAPTURA DE NOMBRE Y APELLIDO ===
-
-                // Si estamos esperando el apellido
-                if (isAwaitingLastName(chatId)) {
-                    const lastName = (userMessage || '').trim();
-                    const firstName = getTempFirstName(chatId);
-
-                    if (lastName.length >= 2 && !/^\d+$/.test(lastName)) {
-                        // Guardar nombre y apellido
+                // === SIMPLIFICADO: Solo usar notifyName de WhatsApp ===
+                // Si el cliente existe pero tiene nombre inválido, actualizar con notifyName
+                if (clientId && !hasValidSavedName && notifyName && notifyName.length >= 2) {
+                    const invalidNames = ['cliente', 'hola', 'hi', 'hello'];
+                    if (!invalidNames.includes(notifyName.toLowerCase())) {
                         await db.query(
-                            `UPDATE users SET first_name = $1, last_name = $2, updated_at = NOW() WHERE id = $3`,
-                            [firstName, lastName, clientId]
+                            `UPDATE users SET first_name = $1, updated_at = NOW() WHERE id = $2`,
+                            [notifyName, clientId]
                         );
-                        senderName = `${firstName} ${lastName}`;
-                        setAwaitingLastName(chatId, false);
-
-                        console.log(`   ✅ [NOMBRE] Guardado: ${senderName}`);
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `¡Mucho gusto, ${firstName}! 😊\n\n¿En qué te puedo ayudar hoy?\n• Ver servicios disponibles\n• Agendar una cita\n• Consultar horarios`
-                        );
-                        return res.status(200).send('OK');
-                    } else {
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `Por favor, dime tu apellido (mínimo 2 letras) 😊`
-                        );
-                        return res.status(200).send('OK');
+                        senderName = notifyName;
+                        console.log(`   🔄 [NOMBRE] Actualizado desde WhatsApp: ${senderName}`);
                     }
-                }
-
-                // Si estamos esperando el nombre
-                if (isAwaitingName(chatId)) {
-                    const firstName = (userMessage || '').trim();
-                    const invalidNames = ['hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello', 'ok', 'si', 'no'];
-
-                    if (firstName.length >= 2 && !/^\d+$/.test(firstName) && !invalidNames.includes(firstName.toLowerCase())) {
-                        setAwaitingName(chatId, false);
-                        setAwaitingLastName(chatId, true, firstName);
-
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `¡Hola ${firstName}! 👋 ¿Y cuál es tu apellido?`
-                        );
-                        return res.status(200).send('OK');
-                    } else {
-                        await wahaService.sendMessage(chatId, tenantId,
-                            `Por favor, dime tu nombre (mínimo 2 letras) 😊`
-                        );
-                        return res.status(200).send('OK');
-                    }
-                }
-
-                // Si NO tiene nombre válido guardado, pedir nombre
-                if (!hasValidSavedName && !isAwaitingName(chatId) && !isAwaitingLastName(chatId)) {
-                    setAwaitingName(chatId, true);
-                    await wahaService.sendMessage(chatId, tenantId,
-                        `¡Hola! 👋 Bienvenido a nuestro servicio.\n\nPara brindarte una mejor atención, ¿cuál es tu nombre?`
-                    );
-                    return res.status(200).send('OK');
-                }
-
-                // Marcar conversación activa
-                if (!conversationCache.has(chatId)) {
-                    conversationCache.set(chatId, { lastInteraction: Date.now() });
                 }
 
                 console.log(`   👤 Cliente: ${senderName} | ID: ${clientId || 'nuevo'}`);
@@ -358,10 +309,13 @@ exports.handleWahaWebhook = async (req, res) => {
                         // Método 1: URL directa del media (reemplazar localhost con URL real de WAHA)
                         if (payload.media?.url) {
                             try {
-                                // WAHA devuelve localhost:3000 pero corre en WAHA_URL
+                                // WAHA devuelve localhost:3000 o 0.0.0.0:3000 pero corre en WAHA_URL
                                 let mediaUrl = payload.media.url;
                                 if (mediaUrl.includes('localhost:3000')) {
                                     mediaUrl = mediaUrl.replace('http://localhost:3000', WAHA_URL);
+                                }
+                                if (mediaUrl.includes('0.0.0.0:3000')) {
+                                    mediaUrl = mediaUrl.replace('http://0.0.0.0:3000', WAHA_URL);
                                 }
                                 console.log(`   📥 Intentando URL: ${mediaUrl}`);
                                 const audioResponse = await axios.get(mediaUrl, {
@@ -471,6 +425,19 @@ exports.handleWahaWebhook = async (req, res) => {
             // Obtener o crear historial de conversación
             const cacheKey = `${tenantId}:${chatId}`;
             let conversationHistory = conversationCache.get(cacheKey) || [];
+
+            // 🔄 REINICIO DE CONVERSACIÓN: Limpiar historial solo si es un saludo simple o comando explícito
+            const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello)[\s!.]*$/i;
+            const resetCommands = /(empezar de nuevo|cancelar|se me olvid[oó]|reset|reiniciar)/i;
+
+            const isSimpleGreeting = simpleGreetings.test(userMessage.trim());
+            const isResetCommand = resetCommands.test(userMessage.trim());
+
+            if ((isSimpleGreeting || isResetCommand) && conversationHistory.length > 0) {
+                console.log(`🔄 [REINICIO] Limpiando historial de conversación para ${senderName}`);
+                conversationHistory = [];
+                conversationCache.set(cacheKey, conversationHistory);
+            }
 
             // clientId ya está definido arriba en el flujo simplificado
 
@@ -611,7 +578,8 @@ El cliente se llama ${senderName}. Usa su nombre para ser más personal.
 FECHA ACTUAL: Hoy es ${hoyStr}. Usa esta información para interpretar fechas correctamente.
 
 BIENVENIDA:
-- Si el cliente saluda, responde: "¡Hola ${senderName}! 👋 Bienvenido/a a ${tenantName}. ¿En qué te puedo ayudar?"
+- Si el cliente SOLO saluda (ejemplo: "hola", "buenos días", "hi") → responde: "¡Hola ${senderName}! 👋 Bienvenido/a a ${tenantName}. ¿En qué te puedo ayudar?"
+- Si el saludo incluye una solicitud (ejemplo: "Hola quiero un corte", "Buenos días, necesito cita") → NO des bienvenida genérica, procesa la solicitud directamente
 
 FLUJO DE CONVERSACIÓN PARA AGENDAR:
 1. Si el cliente menciona estilista + servicio + fecha + hora de una vez → verifica disponibilidad directamente
@@ -921,13 +889,37 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
     const normalizeHumanTime = (t) => {
         if (!t) return '10:00';
         let s = String(t).toLowerCase().replace(/\s+/g, '');
+        // Corregir typos comunes: "pom" -> "pm", "a.m" -> "am", etc.
+        s = s.replace(/pom/g, 'pm').replace(/aom/g, 'am').replace(/\./g, '');
         const m = s.match(/^(\d{1,2})(?::?(\d{2}))?(am|pm)?$/);
-        if (!m) return '10:00';
+        if (!m) {
+            console.log(`⚠️ [normalizeHumanTime] No pude parsear: "${t}" -> usando 10:00`);
+            return '10:00';
+        }
         let h = parseInt(m[1], 10);
         let mm = m[2] ? parseInt(m[2], 10) : 0;
-        if (m[3] === 'pm' && h < 12) h += 12;
-        if (m[3] === 'am' && h === 12) h = 0;
-        return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+
+        // 🕐 LÓGICA INTELIGENTE: Si no especifica am/pm
+        // - Horas 1-7 sin am/pm → asumir PM (horario comercial peluquería)
+        // - Horas 8-11 sin am/pm → asumir AM (apertura típica)
+        // - Hora 12 sin am/pm → asumir PM (mediodía)
+        if (!m[3]) {
+            if (h >= 1 && h <= 7) {
+                console.log(`   💡 [normalizeHumanTime] "${t}" sin am/pm, hora ${h} → asumiendo PM`);
+                h += 12;
+            } else if (h === 12) {
+                // 12 sin am/pm = mediodía (12 PM)
+                console.log(`   💡 [normalizeHumanTime] "${t}" sin am/pm, hora 12 → asumiendo PM (mediodía)`);
+            }
+            // Si es 8, 9, 10, 11 → se queda como AM (apertura)
+        } else {
+            if (m[3] === 'pm' && h < 12) h += 12;
+            if (m[3] === 'am' && h === 12) h = 0;
+        }
+
+        const result = `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+        console.log(`   🕐 [normalizeHumanTime] "${t}" -> "${result}"`);
+        return result;
     };
 
     // Helper: Verificar si un estilista trabaja en una fecha/hora específica
@@ -1446,10 +1438,24 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                         const slotStart = new Date(`${fecha}T${slotTime}:00`);
                         const slotEnd = new Date(slotStart.getTime() + duracion * 60000);
 
+                        // 🛑 FILTRO DE HORA PASADA (fix)
+                        // Si la fecha es hoy, verificar que la hora del slot sea mayor a la hora actual + buffer
+                        const nowInBogota = formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd HH:mm');
+                        const [todayDate, nowTimeStr] = nowInBogota.split(' ');
+
+                        if (fecha === todayDate) {
+                            // Comparar strings "HH:MM" es seguro porque son formato 24h paddeado
+                            if (slotTime < nowTimeStr) {
+                                continue; // Saltar hora pasada
+                            }
+                        }
+
                         // Verificar si el slot está ocupado
                         const isOccupied = existingAppts.rows.some(a => {
                             const aStart = new Date(a.start_time);
                             const aEnd = new Date(a.end_time);
+                            //                            return (slotStart < aEnd && slotEnd > aStart) || 
+                            //                                   (slotStart.getTime() === aStart.getTime()); 
                             return slotStart < aEnd && slotEnd > aStart;
                         });
 

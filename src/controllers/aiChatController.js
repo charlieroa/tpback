@@ -117,6 +117,10 @@ const AVAILABLE_FUNCTIONS = [
 // Sistema prompt para el asistente
 const SYSTEM_PROMPT = `Eres un asistente virtual amigable de una peluquería. Tu trabajo es ayudar a los clientes a agendar citas.
 
+BIENVENIDA:
+- Si el cliente SOLO saluda (ejemplo: "hola", "buenos días", "hi") → responde con bienvenida amigable
+- Si el saludo incluye una solicitud (ejemplo: "Hola quiero un corte", "Buenos días, necesito cita") → NO des bienvenida genérica, procesa la solicitud directamente
+
 FLUJO DE AGENDAMIENTO:
 1. Si el cliente menciona un ESTILISTA pero NO un servicio → usa obtener_servicios_estilista para preguntarle qué servicio quiere
 2. Si el cliente menciona un SERVICIO → usa verificar_disponibilidad
@@ -135,10 +139,14 @@ REGLAS SOBRE ESTILISTAS Y HORARIOS:
 - Las citas de HOY son válidas para cualquier horario FUTURO (no pasado)
 - Si no hay disponibilidad en un horario → sugiere horarios alternativos
 
-🎲 REGLA DE AUTO-SUGERENCIA DE ESTILISTAS:
-- Si el cliente dice "no sé", "no conozco", "sugiéreme uno", "cualquiera", "el que sea", o similar cuando le preguntas por estilista:
   → Tú AUTOMÁTICAMENTE selecciona uno de los estilistas disponibles y sugiere: "Te sugiero a [Nombre] que está disponible a esa hora. ¿Te lo agendo?"
   → Solo pide confirmación, NO vuelvas a preguntar por estilista.
+
+🛑 REINICIO DE CONTEXTO (IMPORTANTE):
+- Si el usuario saluda ("hola", "buenos días"), dice "se me olvidó", "cancelar", "empezar de nuevo" o cambia drásticamente de tema:
+  → IGNORE totalmente cualquier servicio, fecha, hora o estilista mencionado anteriormente.
+  → Compórtate como si acabaras de conocerlo.
+- Si el usuario elige estilista pero NO ha dicho hora explícitamente en ESTE o el INMEDIATO mensaje anterior, PREGUNTA LA HORA. No asumas ninguna.
 
 REGLAS DE FECHAS Y HORAS:
 - "hoy" es válido para citas en horarios FUTUROS del día actual
@@ -150,7 +158,14 @@ FORMATO:
 - Usa emojis para ser amigable 💇✂️📅
 - Mantén respuestas cortas y claras
 - Presenta opciones como lista cuando haya varias
-- NUNCA menciones servicios que no existan en la base de datos`;
+- NUNCA menciones servicios que no existan en la base de datos (si la herramienta no los devuelve, no existen).
+
+🧠 REGLA "SORPRÉNDEME" / SUGERENCIA:
+- Si el usuario dice "no sé", "sugiéreme", "sorpréndeme", "cualquiera" o "el que sea":
+  1. DEBES elegir TÚ MISMO uno de los estilistas que la herramienta indique como DISPONIBLE.
+  2. No le preguntes al usuario "¿te gustaría X o Y?".
+  3. Dí directamente: "Te sugiero a [Nombre] que está disponible. ¿Te lo agendo?"
+  4. NUNCA sugieras a alguien que la herramienta haya marcado como NO disponible.`;
 
 
 // ==================== HELPERS ====================
@@ -189,7 +204,7 @@ function normalizeDateKeyword(dateStr) {
  * Normaliza hora: '3pm', '15:00', '10 de la mañana' -> HH:MM
  */
 function normalizeHumanTimeToHHMM(t) {
-    if (!t) return '10:00';
+    if (!t) return null;
 
     let s = String(t).toLowerCase().replace(/\s+/g, '').replace(/dela|de|la/g, '');
 
@@ -201,14 +216,20 @@ function normalizeHumanTimeToHHMM(t) {
         if (basic) {
             return `${String(basic[1]).padStart(2, '0')}:${basic[2]}`;
         }
-        return '10:00';
+        return null; // Antes era '10:00', ahora es null para obligar a preguntar
     }
 
     let h = parseInt(m[1], 10);
     let mm = m[2] ? parseInt(m[2], 10) : 0;
     const ampm = m[3];
 
-    // Convertir 12h a 24h
+    // HEURÍSTICA: Si el usuario dice "1" a "6" sin especificar AM/PM, asumir PM.
+    // (Contexto: peluquería no agendada citas de 1am a 6am).
+    if (!ampm && h >= 1 && h <= 6) {
+        h += 12;
+    }
+
+    // Convertir 12h a 24h explícito
     if ((ampm === 'pm' || ampm === 'tarde' || ampm === 'noche') && h < 12) {
         h += 12;
     }
@@ -464,7 +485,11 @@ async function executeFunction(functionName, args, tenantId, clientId) {
                                 ? JSON.parse(estilista.working_hours)
                                 : estilista.working_hours;
 
-                            const dayOfWeek = new Date(startTime).getDay(); // 0=domingo, 1=lunes...
+                            // CORRECCIÓN ZONA HORARIA: Usar el día en Bogota, no el del sistema (UTC)
+                            // 'i' devuelve 1 (Lunes) a 7 (Domingo). Convertimos a 0=Domingo, 1=Lunes...
+                            const isoDay = parseInt(formatInTimeZone(startTime, TIME_ZONE, 'i'), 10);
+                            const dayOfWeek = isoDay === 7 ? 0 : isoDay;
+
                             const dayNames = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
                             const dayKey = dayNames[dayOfWeek];
                             const horaNum = parseInt(hora.split(':')[0], 10);
@@ -540,7 +565,10 @@ async function executeFunction(functionName, args, tenantId, clientId) {
 
                     // Buscar estilistas SIN conflicto a esa hora Y que trabajen a esa hora
                     const availableStylists = [];
-                    const dayOfWeek = new Date(startTime).getDay();
+                    // CORRECCIÓN ZONA HORARIA
+                    const isoDay = parseInt(formatInTimeZone(startTime, TIME_ZONE, 'i'), 10);
+                    const dayOfWeek = isoDay === 7 ? 0 : isoDay;
+
                     const dayNames = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
                     const dayKey = dayNames[dayOfWeek];
                     const horaNum = parseInt(hora.split(':')[0], 10);
@@ -647,6 +675,13 @@ async function executeFunction(functionName, args, tenantId, clientId) {
 
                 const fecha = normalizeDateKeyword(args.fecha);
                 const hora = normalizeHumanTimeToHHMM(args.hora);
+
+                if (!hora) {
+                    return {
+                        success: false,
+                        message: '¿A qué hora te gustaría agendar la cita?'
+                    };
+                }
 
                 // Buscar servicio
                 const svcResult = await db.query(
@@ -771,6 +806,18 @@ exports.chat = async (req, res) => {
         }
 
         console.log(`\n💬 [AI Chat] Mensaje: "${message}"`);
+
+        // 🔄 REINICIO DE CONVERSACIÓN: Limpiar historial solo si es un saludo simple o comando explícito
+        const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello)[\s!.]*$/i;
+        const resetCommands = /(empezar de nuevo|cancelar|se me olvid[oó]|reset|reiniciar)/i;
+
+        const isSimpleGreeting = simpleGreetings.test(message.trim());
+        const isResetCommand = resetCommands.test(message.trim());
+
+        if ((isSimpleGreeting || isResetCommand) && conversationHistory.length > 0) {
+            console.log(`🔄 [REINICIO] Limpiando historial de conversación`);
+            conversationHistory = [];
+        }
 
         // Construir mensajes para OpenAI
         const messages = [
