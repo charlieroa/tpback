@@ -4,9 +4,19 @@ const db = require('../config/db');
 const wahaService = require('../services/wahaService');
 const { formatInTimeZone, zonedTimeToUtc } = require('date-fns-tz');
 const { getIO } = require('../socket');
+const {
+    resolveServiceFuzzy,
+    resolveStylistFuzzy,
+    findAvailableStylists,
+    createAppointmentRecord
+} = require('../services/appointmentService'); // Servicio de orquestación
+const appointmentService = require('../services/appointmentService'); // (Redundante pero mantenemos por compatibilidad si se usa 'appointmentService.')
+
+console.log('🚀 [DEBUG] whatsappController.js cargado v3 (Logs detallados activados)');
 
 const TIME_ZONE = 'America/Bogota';
 
+const sessions = new Map(); // Cache de sesiones: number -> { step, data }
 // Cache para historial de conversación por número de teléfono
 const conversationCache = new Map();
 
@@ -578,39 +588,28 @@ El cliente se llama ${senderName}. Usa su nombre para ser más personal.
 FECHA ACTUAL: Hoy es ${hoyStr}. Usa esta información para interpretar fechas correctamente.
 
 BIENVENIDA:
-- Si el cliente SOLO saluda (ejemplo: "hola", "buenos días", "hi") → responde: "¡Hola ${senderName}! 👋 Bienvenido/a a ${tenantName}. ¿En qué te puedo ayudar?"
-- Si el saludo incluye una solicitud (ejemplo: "Hola quiero un corte", "Buenos días, necesito cita") → NO des bienvenida genérica, procesa la solicitud directamente
+- Si el cliente SOLO saluda (ejemplo: "hola", "buenos días") → Responde con bienvenida amigable y pregunta en qué puedes ayudar.
+- Si el saludo incluye una solicitud → NO des bienvenida, procesa la solicitud directamente.
 
 FLUJO DE CONVERSACIÓN PARA AGENDAR:
-1. Si el cliente menciona estilista + servicio + fecha + hora de una vez → verifica disponibilidad directamente
-2. Si solo mencionan estilista sin servicio → consulta qué servicios ofrece
-3. Si mencionan servicio pero no estilista → verifica disponibilidad y sugiere estilistas disponibles
-4. SIEMPRE pide confirmación antes de agendar: "¿Confirmo tu cita de [servicio] con [estilista] el [fecha] a las [hora]?"
-5. Solo agenda cuando el cliente diga "sí", "confirma", "dale", etc.
+1. Si el cliente menciona estilista + servicio + fecha + hora → verifica disponibilidad.
+2. Si menciona ESTILISTA pero NO servicio:
+   - Si el servicio se mencionó en un mensaje anterior reciente o está implícito en el contexto, ASUME ese servicio y verifica disponibilidad.
+   - Si NO hay contexto de servicio, usa obtener_servicios_estilista.
+3. Si menciona SERVICIO pero NO estilista → verifica disponibilidad y sugiere opciones.
+4. Para AGENDAR (agendar_cita), necesitas CONFIRMAR: servicio, fecha y hora.
+   - El Estilista es opcional (si no elige, el sistema asigna uno).
+   - SIEMPRE pide confirmación final explícita ("¿Confirmo tu cita...?").
 
-⚠️ REGLAS CRÍTICAS SOBRE SERVICIOS (MUY IMPORTANTE):
-- NUNCA menciones un servicio sin antes llamar a listar_servicios o verificar_disponibilidad
-- Si el cliente pide "corte", primero verifica que "corte" existe como servicio
-- NO inventes servicios como "corte moderno", "peinado especial", etc. - solo los que devuelven las funciones
-- Si el servicio no existe, usa listar_servicios y muestra las opciones
-- Si el cliente pide algo que NO existe, di: "Ese servicio no lo tenemos. Nuestros servicios son: [lista]"
-
-⚠️ REGLAS CRÍTICAS SOBRE DISPONIBILIDAD:
-- Si preguntan "¿quién me puede atender hoy/a las X?" → usa verificar_disponibilidad para ver quién TRABAJA ese día/hora
-- NO sugieras estilistas sin verificar primero que trabajan en esa fecha/hora
-- Si nadie está disponible a esa hora, sugiere otras horas o estilistas
-
-REGLAS IMPORTANTES:
-- Sé EXPLÍCITO: cuando listes servicios de un estilista, di claramente "Estos son los servicios de [nombre]"
-- No asumas lo que el cliente quiere - pregunta si no está claro
-- Si falta información (servicio, fecha u hora), pregunta por ella
-- NO pidas nombre ni teléfono - ya los tienes
-- Respuestas claras y paso a paso
+⚠️ REGLAS CRÍTICAS:
+- NUNCA inventes servicios. Solo los que devuelve listar_servicios.
+- Si el cliente confirma un estilista (ej: "Sí, con Sofía"), ASUME el servicio del contexto anterior. NO vuelvas a preguntar "¿qué servicio?" si ya se sabe.
+- Si verificar_disponibilidad devuelve slots, SUGIERE uno específico: "¿Te queda bien a las 3pm?"
 
 ESTILO:
-- Español colombiano natural: "¡Listo!", "¡Claro que sí!", "Con mucho gusto"
-- Emojis con moderación 💇✂️📅
-- Máximo 2-3 oraciones por respuesta`;
+- Español colombiano amigable.
+- Respuestas cortas.
+- Usa emojis moderados.`;
 
     const FUNCTIONS = [
         {
@@ -924,7 +923,10 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
 
     // Helper: Verificar si un estilista trabaja en una fecha/hora específica
     const checkStylistWorksAtTime = (stylistWorkingHours, fecha, hora) => {
-        if (!stylistWorkingHours) return true; // Si no tiene horario, asumir disponible
+        if (!stylistWorkingHours) {
+            console.log(`   ✅ [DEBUG working_hours] Sin horario definido (NULL), asumiendo disponible`);
+            return true;
+        }
 
         try {
             const wh = typeof stylistWorkingHours === 'string'
@@ -942,7 +944,11 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
 
             // Buscar en español o inglés
             const schedule = wh[dayKey] || wh[dayKeyEn];
-            if (!schedule) return false; // No trabaja ese día
+            console.log(`   🗓️ [DEBUG working_hours] ${dayKey}:`, JSON.stringify(schedule));
+            if (!schedule) {
+                console.log(`   ❌ [DEBUG working_hours] No trabaja el ${dayKey}`);
+                return false; // No trabaja ese día
+            }
 
             // Parsear horario
             let startWork, endWork;
@@ -1036,6 +1042,37 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
             }
 
             case 'obtener_servicios_estilista': {
+                const resolution = await resolveStylistFuzzy(tenantId, { stylist: args.estilista }, 10);
+                const stylist = resolution.chosen;
+
+                if (!stylist) {
+                    return { success: false, message: `No encontré a "${args.estilista || ''}".` };
+                }
+
+                const servicesResult = await db.query(
+                    `SELECT s.name FROM services s
+                     INNER JOIN stylist_services ss ON s.id = ss.service_id
+                     WHERE ss.user_id = $1`,
+                    [stylist.id]
+                );
+
+                const nombre = stylist.name || stylist.first_name;
+                const servicios = servicesResult.rows.map(s => s.name);
+
+                if (servicios.length === 0) {
+                    return { success: true, message: `${nombre} no tiene servicios asignados.` };
+                }
+
+                return {
+                    success: true,
+                    estilista: nombre,
+                    servicios,
+                    message: `${nombre} ofrece: ${servicios.join(', ')}`
+                };
+            }
+
+            /* ================= DISABLED LEGACY LOGIC =================
+            case 'obtener_servicios_estilista_OLD_DISABLED': {
                 const stylistResult = await db.query(
                     `SELECT id, first_name, last_name FROM users 
                      WHERE tenant_id = $1 AND role_id = 3 
@@ -1064,7 +1101,7 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     servicios,
                     message: `${nombre} ofrece: ${servicios.join(', ')}`
                 };
-            }
+            */
 
             case 'verificar_disponibilidad': {
                 console.log(`   📅 [DEBUG] args.fecha recibido de GPT: "${args.fecha}"`);
@@ -1073,6 +1110,154 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 const hora = args.hora ? normalizeHumanTime(args.hora) : null;
                 console.log(`   📅 [DEBUG] args.hora: "${args.hora}" -> hora normalizada: "${hora}"`);
 
+                /* =======================================================
+                   REFACTOR: USAR ORQUESTADOR (appointmentHelpers)
+                   ======================================================= */
+
+                // 1. Resolver Servicio (Fuzzy)
+                const serviceResolution = await resolveServiceFuzzy(tenantId, { service: args.servicio }, 10);
+                let chosenService = serviceResolution.chosen;
+
+                // 2. Resolver Estilista (Fuzzy)
+                const stylistResolution = await resolveStylistFuzzy(tenantId, { stylist: args.estilista }, 10);
+                let chosenStylist = stylistResolution.chosen;
+
+                // 3. Fallback: Si no hay servicio pero sí un estilista, intentar inferir
+                if (!chosenService && chosenStylist) {
+                    const services = await db.query(
+                        `SELECT s.id, s.name FROM services s
+                         INNER JOIN stylist_services ss ON s.id = ss.service_id
+                         WHERE ss.user_id = $1`,
+                        [chosenStylist.id]
+                    );
+
+                    if (services.rows.length === 1) {
+                        chosenService = services.rows[0];
+                        console.log(`   ✅ [DEBUG] Servicio inferido del estilista: ${chosenService.name}`);
+                    } else if (services.rows.length > 1) {
+                        const serviceNames = services.rows.map(s => s.name).join(', ');
+                        return { success: false, message: `¿Para qué servicio con ${chosenStylist.name}? Realiza: ${serviceNames}` };
+                    }
+                }
+
+                if (!chosenService) {
+                    const allServices = await db.query(`SELECT name FROM services WHERE tenant_id = $1 ORDER BY name`, [tenantId]);
+                    const serviceList = allServices.rows.map(s => s.name).join(', ');
+                    return { success: false, message: `No encontré el servicio "${args.servicio || ''}". Nuestros servicios disponibles son: ${serviceList}` };
+                }
+
+                // 4. Chequeo de disponibilidad real usando appointmentHelpers / Service
+                if (chosenStylist) {
+                    // Verificar si ofrece el servicio
+                    const offers = await appointmentService.checkStylistOffersService(chosenStylist.id, chosenService.id);
+                    if (!offers) {
+                        return { success: false, message: `${chosenStylist.name} no ofrece ${chosenService.name}.` };
+                    }
+
+                    // Verificar disponibilidad
+                    if (hora) {
+                        const available = await findAvailableStylists(tenantId, chosenService.name, fecha, hora);
+                        const isAvailable = available.some(s => s.id === chosenStylist.id);
+
+                        if (!isAvailable) {
+                            return {
+                                success: true,
+                                available: false,
+                                servicio: chosenService.name,
+                                estilista: chosenStylist.name,
+                                message: `${chosenStylist.name} no está disponible el ${fecha} a las ${hora}. ¿Quieres buscar otro horario?`
+                            };
+                        }
+
+                        return {
+                            success: true,
+                            available: true,
+                            servicio: chosenService.name,
+                            estilista: chosenStylist.name,
+                            fecha,
+                            hora,
+                            message: `✅ ¡Sí! ${chosenStylist.name} puede atenderte a las ${hora} para ${chosenService.name}. ¿Agendamos?`
+                        };
+
+                    } else {
+                        const { slots } = await appointmentService.getAvailableSlotsForStylist(tenantId, chosenStylist.id, chosenService.id, fecha, 0);
+                        if (slots.length === 0) {
+                            return { success: true, available: false, message: `${chosenStylist.name} no tiene disponibilidad el ${fecha}.` };
+                        }
+                        return {
+                            success: true,
+                            servicio: chosenService.name,
+                            estilistas_disponibles: chosenStylist.name,
+                            fecha,
+                            message: `${chosenStylist.name} tiene disponibilidad el ${fecha}. ¿A qué hora te gustaría?`
+                        };
+                    }
+                }
+
+                // Si NO tenemos estilista, buscar cualquiera disponible
+                const availableStylists = await findAvailableStylists(tenantId, chosenService.name, fecha, hora || '09:00');
+
+                if (hora) {
+                    if (availableStylists.length === 0) {
+                        return { success: true, available: false, message: `No hay estilistas disponibles para ${chosenService.name} a las ${hora}.` };
+                    }
+                    const names = availableStylists.map(s => `${s.first_name} ${s.last_name || ''}`.trim()).join(', ');
+                    return {
+                        success: true,
+                        available: true,
+                        servicio: chosenService.name,
+                        estilistas_disponibles: names,
+                        fecha,
+                        hora,
+                        message: `A las ${hora} pueden atenderte: ${names}. ¿Con quién te gustaría?`
+                    };
+                } else {
+                    return {
+                        success: true,
+                        servicio: chosenService.name,
+                        message: `Para ${chosenService.name} el ${fecha}, tenemos varios estilistas. ¿A qué hora te gustaría venir?`
+                    };
+                }
+            }
+
+            /* ================= DISABLED LEGACY LOGIC =================
+            case 'verificar_disponibilidad_OLD_DISABLED': {
+                console.log(`   📅 [DEBUG] args.fecha recibido de GPT: "${args.fecha}"`);
+                const fecha = normalizeDateKeyword(args.fecha);
+                console.log(`   📅 [DEBUG] fecha normalizada: "${fecha}"`);
+                const hora = args.hora ? normalizeHumanTime(args.hora) : null;
+                console.log(`   📅 [DEBUG] args.hora: "${args.hora}" -> hora normalizada: "${hora}"`);
+
+                // --- LOGICA DE INFERENCIA DE SERVICIO ---
+                if (!args.servicio && args.estilista) {
+                    console.log(`   🤔 [DEBUG] Servicio no especificado. Intentando inferir del estilista: "${args.estilista}"`);
+                    const stylistForService = await db.query(
+                        `SELECT id, first_name FROM users WHERE tenant_id = $1 AND role_id = 3 
+                         AND (LOWER(first_name) LIKE $2 OR LOWER(CONCAT(first_name, ' ', last_name)) LIKE $2) LIMIT 1`,
+                        [tenantId, `%${args.estilista.toLowerCase()}%`]
+                    );
+
+                    if (stylistForService.rows.length > 0) {
+                        const sID = stylistForService.rows[0].id;
+                        const sName = stylistForService.rows[0].first_name;
+
+                        const stylistServices = await db.query(
+                            `SELECT s.id, s.name, s.duration_minutes FROM services s
+                             INNER JOIN stylist_services ss ON s.id = ss.service_id
+                             WHERE ss.user_id = $1`,
+                            [sID]
+                        );
+
+                        if (stylistServices.rows.length === 1) {
+                            args.servicio = stylistServices.rows[0].name;
+                            console.log(`   ✅ [DEBUG] Servicio inferido: ${args.servicio}`);
+                        } else if (stylistServices.rows.length > 1) {
+                            const serviceNames = stylistServices.rows.map(s => s.name).join(', ');
+                            return { success: false, message: `¿Para qué servicio con ${sName}? Realiza: ${serviceNames}` };
+                        }
+                    }
+                }
+
                 const svcResult = await db.query(
                     `SELECT id, name, duration_minutes FROM services 
                      WHERE tenant_id = $1 AND LOWER(name) LIKE $2 LIMIT 1`,
@@ -1080,7 +1265,12 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                 );
 
                 if (svcResult.rows.length === 0) {
-                    return { success: false, message: `No encontré el servicio "${args.servicio}"` };
+                    const allServices = await db.query(
+                        `SELECT name FROM services WHERE tenant_id = $1 ORDER BY name`,
+                        [tenantId]
+                    );
+                    const serviceList = allServices.rows.map(s => s.name).join(', ');
+                    return { success: false, message: `No encontré el servicio "${args.servicio}". Nuestros servicios disponibles son: ${serviceList}` };
                 }
 
                 const servicio = svcResult.rows[0];
@@ -1152,6 +1342,8 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                                 id: stylist.id,
                                 nombre: `${stylist.first_name} ${stylist.last_name || ''}`.trim()
                             });
+                        } else {
+                            console.log(`   ⛔ [DEBUG conflict] ${stylist.first_name} tiene cita: ${conflict.rows[0].id}`);
                         }
                     }
 
@@ -1198,15 +1390,14 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     fecha,
                     message: `Para ${servicio.name} el ${fecha} pueden atenderte: ${nombres}. ¿A qué hora te gustaría?`
                 };
-            }
+            */
 
             case 'agendar_cita': {
-                // Si no hay clientId, crear cliente automáticamente con datos de WAHA
+                // Si no hay clientId, crear cliente automáticamente con datos de WAHA (Lógica Original Preservada)
                 let finalClientId = clientId;
                 if (!finalClientId && phoneNumber) {
                     console.log(`   👤 Creando cliente: ${senderName} (${phoneNumber})`);
                     try {
-                        // Buscar si ya existe por teléfono
                         const existingClient = await db.query(
                             `SELECT id FROM users WHERE tenant_id = $1 AND role_id = 4 AND phone LIKE $2 LIMIT 1`,
                             [tenantId, `%${phoneNumber.slice(-10)}%`]
@@ -1214,7 +1405,6 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                         if (existingClient.rows.length > 0) {
                             finalClientId = existingClient.rows[0].id;
                         } else {
-                            // Crear cliente nuevo
                             const newClient = await db.query(
                                 `INSERT INTO users (tenant_id, role_id, first_name, last_name, email, password_hash, phone)
                                  VALUES ($1, 4, $2, '', $3, 'whatsapp', $4)
@@ -1234,110 +1424,279 @@ async function executeWhatsAppFunction(functionName, args, tenantId, clientId, s
                     return { success: false, message: 'No pude obtener tus datos. Por favor intenta de nuevo.' };
                 }
 
-                console.log(`   📅 [DEBUG agendar] args.fecha: "${args.fecha}", args.hora: "${args.hora}"`);
+                // --- REFACTOR: ORQUESTADOR ---
                 const fecha = normalizeDateKeyword(args.fecha);
                 const hora = normalizeHumanTime(args.hora);
-                console.log(`   📅 [DEBUG agendar] fecha normalizada: "${fecha}", hora: "${hora}"`);
 
-                const svcResult = await db.query(
-                    `SELECT id, name, duration_minutes FROM services WHERE tenant_id = $1 AND LOWER(name) LIKE $2 LIMIT 1`,
-                    [tenantId, `%${(args.servicio || '').toLowerCase()}%`]
+                // 1. Resolver Servicio (Fuzzy)
+                const serviceResolution = await resolveServiceFuzzy(tenantId, { service: args.servicio }, 10);
+                let chosenService = serviceResolution.chosen;
+
+                // 2. Resolver Estilista (Fuzzy)
+                const stylistResolution = await resolveStylistFuzzy(tenantId, { stylist: args.estilista }, 10);
+                let chosenStylist = stylistResolution.chosen;
+
+                // 3. Fallback: Inferir servicio si falta
+                if (!chosenService && chosenStylist) {
+                    const services = await db.query(
+                        `SELECT s.id, s.name FROM services s
+                         INNER JOIN stylist_services ss ON s.id = ss.service_id
+                         WHERE ss.user_id = $1`,
+                        [chosenStylist.id]
+                    );
+                    if (services.rows.length === 1) {
+                        chosenService = services.rows[0];
+                    } else if (services.rows.length > 1) {
+                        const serviceNames = services.rows.map(s => s.name).join(', ');
+                        return { success: false, message: `¿Para qué servicio con ${chosenStylist.name}? Realiza: ${serviceNames}` };
+                    }
+                }
+
+                if (!chosenService) {
+                    return { success: false, message: `No encontré el servicio "${args.servicio || ''}".` };
+                }
+
+                const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
+                const duration = chosenService.duration_minutes || 60;
+
+                // Si no hay estilista, buscar uno disponible
+                if (!chosenStylist) {
+                    const available = await findAvailableStylists(tenantId, chosenService.name, fecha, hora);
+                    if (available.length === 0) {
+                        return { success: false, message: `No hay estilistas disponibles para ${chosenService.name} a las ${hora}.` };
+                    }
+                    // Elegir el primero (random o por orden)
+                    chosenStylist = available[0];
+                } else {
+                    // Verificar disponibilidad del estilista elegido
+                    const available = await findAvailableStylists(tenantId, chosenService.name, fecha, hora);
+                    if (!available.some(s => s.id === chosenStylist.id)) {
+                        return { success: false, message: `${chosenStylist.name} ya no está disponible a las ${hora}.` };
+                    }
+                }
+
+                // Agendar
+                try {
+                    const appointment = await createAppointmentRecord(
+                        tenantId,
+                        finalClientId,
+                        chosenStylist.id,
+                        chosenService.id,
+                        startTime,
+                        duration
+                    );
+
+                    // Socket emission
+                    try {
+                        const endTime = new Date(startTime.getTime() + duration * 60000);
+                        const io = getIO();
+                        io.to(`tenant:${tenantId}`).emit('appointment:created', {
+                            id: appointment.id,
+                            clientId: finalClientId,
+                            clientName: senderName,
+                            stylistId: chosenStylist.id,
+                            stylistName: chosenStylist.name || chosenStylist.first_name,
+                            serviceId: chosenService.id,
+                            serviceName: chosenService.name,
+                            startTime: startTime.toISOString(),
+                            endTime: endTime.toISOString(),
+                            status: 'scheduled',
+                            createdVia: 'whatsapp'
+                        });
+                    } catch (socketErr) { console.log('Socket err', socketErr.message); }
+
+                    return {
+                        success: true,
+                        message: `🎉 ¡Cita agendada!\n📅 ${fecha} a las ${hora}\n💇 ${chosenService.name}\n👤 ${chosenStylist.name || chosenStylist.first_name}\n\n¡Te esperamos!`
+                    };
+
+                } catch (err) {
+                    console.error(err);
+                    return { success: false, message: `No se pudo agendar: ${err.message}` };
+                }
+            }
+
+            /* ================= DISABLED LEGACY LOGIC =================
+            case 'agendar_cita_OLD_DISABLED': {
+            // Si no hay clientId, crear cliente automáticamente con datos de WAHA
+            let finalClientId = clientId;
+            if (!finalClientId && phoneNumber) {
+                console.log(`   👤 Creando cliente: ${senderName} (${phoneNumber})`);
+                try {
+                    // Buscar si ya existe por teléfono
+                    const existingClient = await db.query(
+                        `SELECT id FROM users WHERE tenant_id = $1 AND role_id = 4 AND phone LIKE $2 LIMIT 1`,
+                        [tenantId, `%${phoneNumber.slice(-10)}%`]
+                    );
+                    if (existingClient.rows.length > 0) {
+                        finalClientId = existingClient.rows[0].id;
+                    } else {
+                        // Crear cliente nuevo
+                        const newClient = await db.query(
+                            `INSERT INTO users (tenant_id, role_id, first_name, last_name, email, password_hash, phone)
+                                 VALUES ($1, 4, $2, '', $3, 'whatsapp', $4)
+                                 RETURNING id`,
+                            [tenantId, senderName, `${phoneNumber}@whatsapp.temp`, phoneNumber]
+                        );
+                        finalClientId = newClient.rows[0].id;
+                        console.log(`   ✅ Cliente creado: ID ${finalClientId}`);
+                    }
+                } catch (createErr) {
+                    console.error('   ❌ Error creando cliente:', createErr.message);
+                    return { success: false, message: 'Hubo un problema registrando tus datos. Por favor intenta de nuevo.' };
+                }
+            }
+    
+            if (!finalClientId) {
+                return { success: false, message: 'No pude obtener tus datos. Por favor intenta de nuevo.' };
+            }
+    
+            console.log(`   📦 [DEBUG agendar] Argumentos completos:`, JSON.stringify(args));
+            console.log(`   📅 [DEBUG agendar] args.fecha: "${args.fecha}", args.hora: "${args.hora}", args.servicio: "${args.servicio}", args.estilista: "${args.estilista}"`);
+    
+            const fecha = normalizeDateKeyword(args.fecha);
+            const hora = normalizeHumanTime(args.hora);
+            console.log(`   📅 [DEBUG agendar] fecha normalizada: "${fecha}", hora: "${hora}"`);
+    
+            // --- LOGICA DE INFERENCIA DE SERVICIO ---
+            if (!args.servicio && args.estilista) {
+                console.log(`   🤔 [DEBUG agendar] Servicio no especificado. Intentando inferir del estilista: "${args.estilista}"`);
+                const stylistForService = await db.query(
+                    `SELECT id, first_name FROM users WHERE tenant_id = $1 AND role_id = 3 
+                         AND (LOWER(first_name) LIKE $2 OR LOWER(CONCAT(first_name, ' ', last_name)) LIKE $2) LIMIT 1`,
+                    [tenantId, `%${args.estilista.toLowerCase()}%`]
                 );
-
-                if (svcResult.rows.length === 0) {
-                    return { success: false, message: `No encontré el servicio` };
+    
+                if (stylistForService.rows.length > 0) {
+                    const sID = stylistForService.rows[0].id;
+                    const sName = stylistForService.rows[0].first_name;
+    
+                    const stylistServices = await db.query(
+                        `SELECT s.id, s.name, s.duration_minutes FROM services s
+                             INNER JOIN stylist_services ss ON s.id = ss.service_id
+                             WHERE ss.user_id = $1`,
+                        [sID]
+                    );
+    
+                    if (stylistServices.rows.length === 1) {
+                        args.servicio = stylistServices.rows[0].name;
+                        console.log(`   ✅ [DEBUG agendar] Servicio inferido: ${args.servicio}`);
+                    } else if (stylistServices.rows.length > 1) {
+                        const serviceNames = stylistServices.rows.map(s => s.name).join(', ');
+                        return { success: false, message: `¿Para qué servicio con ${sName}? Realiza: ${serviceNames}` };
+                    }
                 }
-
-                const servicio = svcResult.rows[0];
-
-                let queryParams = [tenantId, servicio.id];
-                let stylistCondition = '';
-                if (args.estilista) {
-                    // Buscar por nombre O nombre completo (igual que verificar_disponibilidad)
-                    stylistCondition = `AND (LOWER(u.first_name) LIKE $3 OR LOWER(CONCAT(u.first_name, ' ', u.last_name)) LIKE $3)`;
-                    queryParams.push(`%${args.estilista.toLowerCase()}%`);
-                }
-
-                const stylistResult = await db.query(
-                    `SELECT u.id, u.first_name, u.last_name FROM users u
+            }
+    
+            const svcResult = await db.query(
+                `SELECT id, name, duration_minutes FROM services WHERE tenant_id = $1 AND LOWER(name) LIKE $2 LIMIT 1`,
+                [tenantId, `%${(args.servicio || '').toLowerCase()}%`]
+            );
+    
+            if (svcResult.rows.length === 0) {
+                console.log(`   ❌ [DEBUG agendar] Servicio no encontrado. Query: ILIKE %${(args.servicio || '').toLowerCase()}%`);
+                const allServices = await db.query(
+                    `SELECT name FROM services WHERE tenant_id = $1 ORDER BY name`,
+                    [tenantId]
+                );
+                const serviceList = allServices.rows.map(s => s.name).join(', ');
+                return { success: false, message: `No encontré el servicio "${args.servicio}". Nuestros servicios disponibles son: ${serviceList}` };
+            }
+    
+            const servicio = svcResult.rows[0];
+            console.log(`   ✅ [DEBUG agendar] Servicio encontrado: ${servicio.name} (ID: ${servicio.id})`);
+    
+            let queryParams = [tenantId, servicio.id];
+            let stylistCondition = '';
+            if (args.estilista) {
+                console.log(`   🔎 [DEBUG agendar] Buscando estilista por: "${args.estilista}"`);
+                // Buscar por nombre O nombre completo (igual que verificar_disponibilidad)
+                stylistCondition = `AND (LOWER(u.first_name) LIKE $3 OR LOWER(CONCAT(u.first_name, ' ', u.last_name)) LIKE $3)`;
+                queryParams.push(`%${args.estilista.toLowerCase()}%`);
+            }
+    
+            const stylistResult = await db.query(
+                `SELECT u.id, u.first_name, u.last_name FROM users u
                      INNER JOIN stylist_services ss ON u.id = ss.user_id
                      WHERE u.tenant_id = $1 AND ss.service_id = $2 AND u.role_id = 3
                      AND COALESCE(u.status, 'active') = 'active'
                      ${stylistCondition} LIMIT 1`,
-                    queryParams
-                );
-
-                if (stylistResult.rows.length === 0) {
-                    const estilistaNombre = args.estilista || 'ninguno especificado';
-                    return { success: false, message: `No hay estilistas disponibles para este servicio${args.estilista ? ` (${estilistaNombre})` : ''}. ¿Quieres ver los estilistas disponibles?` };
-                }
-
-                const estilista = stylistResult.rows[0];
-                const nombreEstilista = `${estilista.first_name} ${estilista.last_name || ''}`.trim();
-
-                // Validar que la hora no sea en el pasado si es hoy
-                const nowInBogota = formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd HH:mm');
-                const [todayDate, nowTime] = nowInBogota.split(' ');
-
-                if (fecha === todayDate && hora < nowTime) {
-                    return {
-                        success: false,
-                        message: `⏰ Las ${hora} ya pasaron. Son las ${nowTime.slice(0, 5)}. ¿A qué hora te gustaría agendar?`
-                    };
-                }
-
-                const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
-                const endTime = new Date(startTime.getTime() + servicio.duration_minutes * 60000);
-
-                // Verificar conflictos de horario antes de agendar
-                const conflict = await db.query(
-                    `SELECT id FROM appointments 
+                queryParams
+            );
+    
+            if (stylistResult.rows.length === 0) {
+                console.log(`   ❌ [DEBUG agendar] No se encontró estilista. Query params: ${JSON.stringify(queryParams)}`);
+                const estilistaNombre = args.estilista || 'ninguno especificado';
+                return { success: false, message: `No hay estilistas disponibles para este servicio${args.estilista ? ` (${estilistaNombre})` : ''}. ¿Quieres ver los estilistas disponibles?` };
+            }
+    
+            const estilista = stylistResult.rows[0];
+            console.log(`   ✅ [DEBUG agendar] Estilista encontrado: ${estilista.first_name} (ID: ${estilista.id})`);
+            const nombreEstilista = `${estilista.first_name} ${estilista.last_name || ''}`.trim();
+    
+            // Validar que la hora no sea en el pasado si es hoy
+            const nowInBogota = formatInTimeZone(new Date(), TIME_ZONE, 'yyyy-MM-dd HH:mm');
+            const [todayDate, nowTime] = nowInBogota.split(' ');
+    
+            if (fecha === todayDate && hora < nowTime) {
+                return {
+                    success: false,
+                    message: `⏰ Las ${hora} ya pasaron. Son las ${nowTime.slice(0, 5)}. ¿A qué hora te gustaría agendar?`
+                };
+            }
+    
+            const startTime = zonedTimeToUtc(`${fecha} ${hora}:00`, TIME_ZONE);
+            const endTime = new Date(startTime.getTime() + servicio.duration_minutes * 60000);
+    
+            // Verificar conflictos de horario antes de agendar
+            const conflict = await db.query(
+                `SELECT id FROM appointments 
                      WHERE tenant_id = $1 AND stylist_id = $2 
                      AND status IN ('scheduled','rescheduled','checked_in')
                      AND (start_time, end_time) OVERLAPS ($3::timestamptz, $4::timestamptz)`,
-                    [tenantId, estilista.id, startTime, endTime]
-                );
-
-                if (conflict.rows.length > 0) {
-                    return {
-                        success: false,
-                        message: `❌ ${nombreEstilista} ya tiene una cita a esa hora. ¿Quieres otra hora o probar con otro estilista?`
-                    };
-                }
-
-                const appointmentResult = await db.query(
-                    `INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status)
-                     VALUES ($1, $2, $3, $4, $5, $6, 'scheduled')
-                     RETURNING id`,
-                    [tenantId, finalClientId, estilista.id, servicio.id, startTime, endTime]
-                );
-
-                // 📡 Emitir evento WebSocket para actualizar calendario en tiempo real
-                try {
-                    const io = getIO();
-                    io.to(`tenant:${tenantId}`).emit('appointment:created', {
-                        id: appointmentResult.rows[0].id,
-                        clientId: finalClientId,
-                        clientName: senderName,
-                        stylistId: estilista.id,
-                        stylistName: nombreEstilista,
-                        serviceId: servicio.id,
-                        serviceName: servicio.name,
-                        startTime: startTime.toISOString(),
-                        endTime: endTime.toISOString(),
-                        status: 'scheduled',
-                        createdVia: 'whatsapp'
-                    });
-                    console.log(`   📡 [SOCKET] Evento appointment:created emitido para tenant ${tenantId}`);
-                } catch (socketErr) {
-                    console.log(`   ⚠️ [SOCKET] No se pudo emitir evento:`, socketErr.message);
-                }
-
+                [tenantId, estilista.id, startTime, endTime]
+            );
+    
+            if (conflict.rows.length > 0) {
                 return {
-                    success: true,
-                    message: `🎉 ¡Cita agendada!\n📅 ${fecha} a las ${hora}\n💇 ${servicio.name}\n👤 ${nombreEstilista}\n\n¡Te esperamos!`
+                    success: false,
+                    message: `❌ ${nombreEstilista} ya tiene una cita a esa hora. ¿Quieres otra hora o probar con otro estilista?`
                 };
             }
+    
+            const appointmentResult = await db.query(
+                `INSERT INTO appointments (tenant_id, client_id, stylist_id, service_id, start_time, end_time, status)
+                     VALUES ($1, $2, $3, $4, $5, $6, 'scheduled')
+                     RETURNING id`,
+                [tenantId, finalClientId, estilista.id, servicio.id, startTime, endTime]
+            );
+    
+            // 📡 Emitir evento WebSocket para actualizar calendario en tiempo real
+            try {
+                const io = getIO();
+                io.to(`tenant:${tenantId}`).emit('appointment:created', {
+                    id: appointmentResult.rows[0].id,
+                    clientId: finalClientId,
+                    clientName: senderName,
+                    stylistId: estilista.id,
+                    stylistName: nombreEstilista,
+                    serviceId: servicio.id,
+                    serviceName: servicio.name,
+                    startTime: startTime.toISOString(),
+                    endTime: endTime.toISOString(),
+                    status: 'scheduled',
+                    createdVia: 'whatsapp'
+                });
+                console.log(`   📡 [SOCKET] Evento appointment:created emitido para tenant ${tenantId}`);
+            } catch (socketErr) {
+                console.log(`   ⚠️ [SOCKET] No se pudo emitir evento:`, socketErr.message);
+            }
+    
+            return {
+                success: true,
+                message: `🎉 ¡Cita agendada!\n📅 ${fecha} a las ${hora}\n💇 ${servicio.name}\n👤 ${nombreEstilista}\n\n¡Te esperamos!`
+            };
+            */
 
             case 'listar_horarios_disponibles': {
                 const fecha = normalizeDateKeyword(args.fecha);
