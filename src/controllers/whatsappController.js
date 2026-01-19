@@ -5,12 +5,15 @@ const wahaService = require('../services/wahaService');
 const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
 
-console.log('🚀 [DEBUG] whatsappController.js cargado v4 (Usando Orquestador)');
+console.log('🚀 [DEBUG] whatsappController.js cargado v5 (Orquestador + Contexto Mejorado)');
 
 const TIME_ZONE = 'America/Bogota';
 
-// Cache para historial de conversación por número de teléfono
+// Cache para historial de conversación
 const conversationCache = new Map();
+
+// Cache para datos de reserva en progreso
+const bookingContextCache = new Map();
 
 /* =================================================================== */
 /* ==============   1. GET STATUS / QR IMAGE (GET)   ================= */
@@ -127,7 +130,7 @@ exports.handleWahaWebhook = async (req, res) => {
                 || payload._data?.pushName
                 || '';
 
-            console.log(`   📋 [PAYLOAD DEBUG] notifyName: "${notifyName}" | payload.notifyName: "${payload.notifyName}" | pushName: "${payload.pushName}"`);
+            console.log(`   📋 [PAYLOAD DEBUG] notifyName: "${notifyName}"`);
 
             // ==========================================
             // GESTIÓN DE CLIENTE
@@ -262,7 +265,7 @@ exports.handleWahaWebhook = async (req, res) => {
                         }
 
                         if (!audioBuffer) {
-                            await wahaService.sendMessage(tenantId, chatId, '🎤 Lo siento, no pude acceder a tu nota de voz. ¿Puedes escribir tu mensaje?');
+                            await wahaService.sendMessage(tenantId, chatId, '🎤 No pude acceder a tu nota de voz. ¿Puedes escribirme?');
                             return res.status(200).send('OK');
                         }
 
@@ -291,12 +294,12 @@ exports.handleWahaWebhook = async (req, res) => {
                             return res.status(200).send('OK');
                         }
                     } else {
-                        await wahaService.sendMessage(tenantId, chatId, '🎤 Lo siento, no puedo procesar notas de voz en este momento.');
+                        await wahaService.sendMessage(tenantId, chatId, '🎤 No puedo procesar notas de voz en este momento.');
                         return res.status(200).send('OK');
                     }
                 } catch (voiceError) {
                     console.error('❌ Error procesando audio:', voiceError.message);
-                    await wahaService.sendMessage(tenantId, chatId, '😅 Hubo un problema con tu nota de voz. ¿Puedes escribir tu mensaje?');
+                    await wahaService.sendMessage(tenantId, chatId, '😅 Hubo un problema con tu nota de voz. ¿Puedes escribirme?');
                     return res.status(200).send('OK');
                 }
             } else if (messageType !== 'chat' || !payload.body) {
@@ -313,11 +316,11 @@ exports.handleWahaWebhook = async (req, res) => {
             );
 
             if (tenantResult.rows.length === 0 || !tenantResult.rows[0].openai_api_key) {
-                console.log('⚠️ [WEBHOOK] No hay API Key configurada para este tenant');
+                console.log('⚠️ [WEBHOOK] No hay API Key configurada');
                 await wahaService.sendMessage(
                     tenantId,
                     chatId,
-                    '⚠️ Lo siento, el asistente no está configurado aún. Por favor contacta al administrador.'
+                    '⚠️ El asistente no está configurado. Contacta al administrador.'
                 );
                 return res.status(200).send('OK');
             }
@@ -325,34 +328,49 @@ exports.handleWahaWebhook = async (req, res) => {
             const apiKey = tenantResult.rows[0].openai_api_key;
             const tenantName = tenantResult.rows[0].name || 'nuestra peluquería';
 
-            // Obtener o crear historial de conversación
+            // Obtener historial y contexto de reserva
             const cacheKey = `${tenantId}:${chatId}`;
             let conversationHistory = conversationCache.get(cacheKey) || [];
+            let bookingContext = bookingContextCache.get(cacheKey) || {};
 
             // Reinicio de conversación
             const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello)[\s!.]*$/i;
-            const resetCommands = /(empezar de nuevo|cancelar|se me olvid[oó]|reset|reiniciar)/i;
+            const resetCommands = /(empezar de nuevo|cancelar|reset|reiniciar|nueva cita|otro servicio)/i;
 
             if ((simpleGreetings.test(userMessage.trim()) || resetCommands.test(userMessage.trim())) && conversationHistory.length > 0) {
-                console.log(`🔄 [REINICIO] Limpiando historial de conversación para ${senderName}`);
+                console.log(`🔄 [REINICIO] Limpiando conversación para ${senderName}`);
                 conversationHistory = [];
+                bookingContext = {};
                 conversationCache.set(cacheKey, conversationHistory);
+                bookingContextCache.set(cacheKey, bookingContext);
             }
 
             try {
-                const aiResponse = await processWithAI(
+                const result = await processWithAI(
                     apiKey,
                     tenantId,
                     clientId,
                     userMessage,
                     conversationHistory,
+                    bookingContext,
                     senderName,
-                    phoneNumber,
                     tenantName
                 );
 
+                // Actualizar contexto
+                if (result.updatedContext) {
+                    bookingContext = { ...bookingContext, ...result.updatedContext };
+                    bookingContextCache.set(cacheKey, bookingContext);
+                    console.log(`   📝 [CONTEXTO]:`, JSON.stringify(bookingContext));
+                }
+
+                // Si se agendó, limpiar contexto
+                if (result.updatedContext?.booked) {
+                    bookingContextCache.set(cacheKey, {});
+                }
+
                 conversationHistory.push({ role: 'user', content: userMessage });
-                conversationHistory.push({ role: 'assistant', content: aiResponse });
+                conversationHistory.push({ role: 'assistant', content: result.response });
 
                 if (conversationHistory.length > 20) {
                     conversationHistory = conversationHistory.slice(-20);
@@ -379,7 +397,7 @@ exports.handleWahaWebhook = async (req, res) => {
                                     'Content-Type': 'application/json'
                                 },
                                 body: JSON.stringify({
-                                    text: aiResponse,
+                                    text: result.response,
                                     model_id: 'eleven_multilingual_v2',
                                     voice_settings: { stability: 0.5, similarity_boost: 0.75 }
                                 })
@@ -401,7 +419,7 @@ exports.handleWahaWebhook = async (req, res) => {
                                 body: JSON.stringify({
                                     model: 'tts-1-hd',
                                     voice: 'alloy',
-                                    input: aiResponse,
+                                    input: result.response,
                                     response_format: 'opus'
                                 })
                             });
@@ -416,23 +434,23 @@ exports.handleWahaWebhook = async (req, res) => {
                             await wahaService.sendVoice(tenantId, chatId, audioBase64);
                             console.log(`   🔊 Respuesta de voz enviada`);
                         } else {
-                            await wahaService.sendMessage(tenantId, chatId, aiResponse);
+                            await wahaService.sendMessage(tenantId, chatId, result.response);
                         }
                     } catch (ttsError) {
                         console.error('⚠️ Error en TTS:', ttsError.message);
-                        await wahaService.sendMessage(tenantId, chatId, aiResponse);
+                        await wahaService.sendMessage(tenantId, chatId, result.response);
                     }
                 } else {
-                    await wahaService.sendMessage(tenantId, chatId, aiResponse);
+                    await wahaService.sendMessage(tenantId, chatId, result.response);
                     console.log(`   ✅ Respuesta enviada`);
                 }
 
             } catch (aiError) {
-                console.error('❌ [WEBHOOK] Error procesando con IA:', aiError.message);
+                console.error('❌ [WEBHOOK] Error IA:', aiError.message);
                 await wahaService.sendMessage(
                     tenantId,
                     chatId,
-                    '😅 Ups, tuve un problema procesando tu mensaje. ¿Puedes intentar de nuevo?'
+                    '😅 Tuve un problema. ¿Puedes intentar de nuevo?'
                 );
             }
         }
@@ -449,85 +467,61 @@ exports.handleWahaWebhook = async (req, res) => {
 /* ==============   HELPER: PROCESAR CON IA (OPENAI)   =============== */
 /* =================================================================== */
 
-async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, senderName = 'Cliente', phoneNumber = '', tenantName = 'nuestra peluquería') {
+async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, bookingContext, senderName, tenantName) {
     const hoyStr = formatInTimeZone(new Date(), TIME_ZONE, "EEEE d 'de' MMMM 'de' yyyy", { locale: require('date-fns/locale/es') });
 
-    const SYSTEM_PROMPT = `Eres un asistente virtual amigable de "${tenantName}" que responde por WhatsApp.
-El cliente se llama ${senderName}. Usa su nombre para ser más personal.
+    // Contexto actual de la reserva
+    let contextInfo = '';
+    if (Object.keys(bookingContext).length > 0) {
+        const parts = [];
+        if (bookingContext.service) parts.push(`- Servicio: ${bookingContext.service}`);
+        if (bookingContext.stylist) parts.push(`- Estilista: ${bookingContext.stylist}`);
+        if (bookingContext.date) parts.push(`- Fecha: ${bookingContext.date}`);
+        if (bookingContext.time) parts.push(`- Hora: ${bookingContext.time}`);
+        if (parts.length > 0) {
+            contextInfo = `\n\n📋 DATOS YA RECOPILADOS (NO pedir de nuevo):\n${parts.join('\n')}`;
+        }
+    }
 
-FECHA ACTUAL: Hoy es ${hoyStr}. Usa esta información para interpretar fechas correctamente.
+    const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
+Hoy: ${hoyStr}.${contextInfo}
 
-BIENVENIDA:
-- Si el cliente SOLO saluda (ejemplo: "hola", "buenos días") → responde: "¡Hola ${senderName}! 👋 Bienvenido/a a ${tenantName}. ¿En qué te puedo ayudar?"
-- Si el saludo incluye una solicitud → procesa la solicitud directamente
+FUNCIÓN DISPONIBLE: "consultar_orquestador" - Úsala para TODO sobre servicios/citas.
 
-🎯 FLUJO INTELIGENTE USANDO EL ORQUESTADOR:
-Tienes UNA SOLA función: "consultar_orquestador". SIEMPRE úsala para:
-- Listar servicios
-- Listar estilistas
-- Verificar disponibilidad
-- Agendar citas
+REGLAS:
+1. SIEMPRE usa el orquestador - NUNCA inventes datos
+2. Incluye TODOS los datos que ya tienes en cada llamada
+3. Respuestas CORTAS (1-2 oraciones)
+4. "sí"/"dale"/"confirmo" después de resumen → action="agendar"
+5. NO repitas preguntas sobre datos que ya tienes
 
-El orquestador te dará respuestas con "status" que indican qué hacer:
-- "need_service" → Pregunta qué servicio quiere
-- "list_stylist_services" → Muestra los servicios que ofrece ese estilista
-- "disambiguation_needed" → Hay varias opciones, pide que elija
-- "choose_time" → Muestra horarios disponibles
-- "confirm" → Pide confirmación antes de agendar
-- "booked" → ¡Cita agendada exitosamente!
-- "stylist_not_offering_service" → El estilista no ofrece ese servicio, muestra alternativas
-
-⚠️ REGLAS CRÍTICAS:
-1. NUNCA inventes servicios ni estilistas - usa SOLO lo que devuelve el orquestador
-2. NUNCA digas que alguien está disponible sin verificar con el orquestador
-3. Si el cliente dice "sí", "confirmo", "dale" después de ver un resumen → usa action="agendar"
-4. Respuestas cortas y directas (2-3 oraciones máximo)
-
-ESTILO:
-- Español colombiano: "¡Listo!", "¡Claro que sí!", "Con mucho gusto"
-- Emojis con moderación 💇✂️📅
-- NO hagas listas largas, sé conciso`;
+FLUJO:
+- Sin servicio → pregunta servicio
+- Con servicio, sin fecha → pregunta fecha  
+- Con todo → muestra resumen y pide confirmación
+- Confirmación recibida → agenda con action="agendar"`;
 
     const FUNCTIONS = [
         {
             type: "function",
             function: {
                 name: "consultar_orquestador",
-                description: "Consulta el orquestador para listar servicios, estilistas, verificar disponibilidad o agendar citas. SIEMPRE usa esta función para cualquier consulta relacionada con servicios, estilistas o citas.",
+                description: "Consulta servicios, disponibilidad y agenda citas. SIEMPRE incluye los datos del contexto actual.",
                 parameters: {
                     type: "object",
                     properties: {
                         action: {
                             type: "string",
-                            description: "Acción a realizar: 'orchestrate' para consultar/verificar, 'agendar' para confirmar una cita",
-                            enum: ["orchestrate", "agendar"]
+                            enum: ["orchestrate", "agendar"],
+                            description: "orchestrate=consultar/verificar, agendar=confirmar cita"
                         },
-                        service: {
-                            type: "string",
-                            description: "Nombre del servicio (ej: 'corte', 'tinte', 'manicure')"
-                        },
-                        stylist: {
-                            type: "string",
-                            description: "Nombre del estilista (ej: 'María', 'Carlos')"
-                        },
-                        date: {
-                            type: "string",
-                            description: "Fecha deseada. Usar palabras del cliente: 'hoy', 'mañana', 'sábado', '21 de enero', etc."
-                        },
-                        time: {
-                            type: "string",
-                            description: "Hora deseada: '3pm', '15:00', '3 de la tarde', etc."
-                        },
-                        selected_service_id: {
-                            type: "string",
-                            description: "UUID del servicio seleccionado (cuando hay desambiguación)"
-                        },
-                        selected_stylist_id: {
-                            type: "string",
-                            description: "UUID del estilista seleccionado (cuando hay desambiguación)"
-                        }
-                    },
-                    required: []
+                        service: { type: "string", description: "Nombre del servicio" },
+                        selected_service_id: { type: "string", description: "UUID del servicio" },
+                        stylist: { type: "string", description: "Nombre del estilista" },
+                        selected_stylist_id: { type: "string", description: "UUID del estilista" },
+                        date: { type: "string", description: "hoy/mañana/YYYY-MM-DD" },
+                        time: { type: "string", description: "5pm/17:00/etc" }
+                    }
                 }
             }
         }
@@ -550,8 +544,8 @@ ESTILO:
             messages,
             tools: FUNCTIONS,
             tool_choice: 'auto',
-            temperature: 0.7,
-            max_tokens: 400
+            temperature: 0.5,
+            max_tokens: 300
         })
     });
 
@@ -562,22 +556,65 @@ ESTILO:
     const data = await response.json();
     const assistantMessage = data.choices[0].message;
 
+    // Si hay llamada a función
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
         const toolCall = assistantMessage.tool_calls[0];
-        const functionName = toolCall.function.name;
         const functionArgs = JSON.parse(toolCall.function.arguments || '{}');
 
-        console.log(`   🔧 Ejecutando función: ${functionName}`);
-        console.log(`   📦 Args:`, JSON.stringify(functionArgs));
+        console.log(`   🔧 [FUNCIÓN] consultar_orquestador`);
+        console.log(`   📦 [ARGS]:`, JSON.stringify(functionArgs));
 
-        const functionResult = await callOrchestrator(functionArgs, tenantId, clientId);
+        // Mezclar con contexto existente
+        const mergedArgs = {
+            ...functionArgs,
+            service: functionArgs.service || bookingContext.service || '',
+            selected_service_id: functionArgs.selected_service_id || bookingContext.service_id || '',
+            stylist: functionArgs.stylist || bookingContext.stylist || '',
+            selected_stylist_id: functionArgs.selected_stylist_id || bookingContext.stylist_id || '',
+            date: functionArgs.date || bookingContext.date || '',
+            time: functionArgs.time || bookingContext.time || ''
+        };
 
-        console.log(`   📋 Resultado orquestador:`, JSON.stringify(functionResult).substring(0, 500));
+        console.log(`   📦 [MERGED]:`, JSON.stringify(mergedArgs));
 
+        const orchestratorResult = await callOrchestrator(mergedArgs, tenantId, clientId);
+
+        console.log(`   📋 [ORQUESTADOR]:`, JSON.stringify(orchestratorResult).substring(0, 400));
+
+        // Extraer contexto actualizado
+        let updatedContext = {};
+
+        if (orchestratorResult.summary) {
+            if (orchestratorResult.summary.service) {
+                updatedContext.service = orchestratorResult.summary.service.name;
+                updatedContext.service_id = orchestratorResult.summary.service.id;
+            }
+            if (orchestratorResult.summary.stylist) {
+                updatedContext.stylist = orchestratorResult.summary.stylist.name;
+                updatedContext.stylist_id = orchestratorResult.summary.stylist.id;
+            }
+            if (orchestratorResult.summary.date) updatedContext.date = orchestratorResult.summary.date;
+            if (orchestratorResult.summary.time) updatedContext.time = orchestratorResult.summary.time;
+        }
+
+        if (orchestratorResult.service) {
+            updatedContext.service = orchestratorResult.service.name;
+            updatedContext.service_id = orchestratorResult.service.id;
+        }
+        if (orchestratorResult.stylist) {
+            updatedContext.stylist = orchestratorResult.stylist.name;
+            updatedContext.stylist_id = orchestratorResult.stylist.id;
+        }
+
+        if (orchestratorResult.status === 'booked') {
+            updatedContext.booked = true;
+        }
+
+        // Segunda llamada a GPT para generar respuesta
         const followUpMessages = [
             ...messages,
             assistantMessage,
-            { role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(functionResult) }
+            { role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(orchestratorResult) }
         ];
 
         const finalResponse = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -589,20 +626,26 @@ ESTILO:
             body: JSON.stringify({
                 model: 'gpt-4o-mini',
                 messages: followUpMessages,
-                temperature: 0.7,
-                max_tokens: 400
+                temperature: 0.5,
+                max_tokens: 300
             })
         });
 
         if (!finalResponse.ok) {
-            return functionResult.message || 'Operación completada.';
+            return {
+                response: orchestratorResult.message || 'Procesado.',
+                updatedContext
+            };
         }
 
         const finalData = await finalResponse.json();
-        return finalData.choices[0].message.content;
+        return {
+            response: finalData.choices[0].message.content,
+            updatedContext
+        };
     }
 
-    return assistantMessage.content;
+    return { response: assistantMessage.content, updatedContext: null };
 }
 
 /* =================================================================== */
@@ -611,10 +654,8 @@ ESTILO:
 
 async function callOrchestrator(args, tenantId, clientId) {
     try {
-        // Importar el controlador de appointments
         const appointmentController = require('./appointmentController');
 
-        // Crear un mock de req/res para llamar al orquestador internamente
         const mockReq = {
             body: {
                 tenantId: tenantId,
@@ -647,28 +688,29 @@ async function callOrchestrator(args, tenantId, clientId) {
 
         await appointmentController.aiOrchestratorPublic(mockReq, mockRes);
 
-        console.log(`   🎯 [ORQUESTADOR] Status: ${responseStatus}`);
+        console.log(`   🎯 [ORQUESTADOR] Status HTTP: ${responseStatus}`);
 
-        // Formatear respuesta para GPT
         if (responseData) {
-            // Añadir contexto útil para GPT
             if (responseData.status === 'booked' && responseData.appointment) {
-                const io = getIO();
-                io.to(`tenant:${tenantId}`).emit('appointment:created', {
-                    ...responseData.appointment,
-                    createdVia: 'whatsapp'
-                });
-                console.log(`   📡 [SOCKET] Evento appointment:created emitido`);
+                try {
+                    const io = getIO();
+                    io.to(`tenant:${tenantId}`).emit('appointment:created', {
+                        ...responseData.appointment,
+                        createdVia: 'whatsapp'
+                    });
+                    console.log(`   📡 [SOCKET] appointment:created emitido`);
+                } catch (socketError) {
+                    console.log(`   ⚠️ [SOCKET] Error:`, socketError.message);
+                }
             }
-
             return responseData;
         }
 
-        return { success: false, message: 'No se pudo procesar la solicitud' };
+        return { success: false, message: 'Error procesando solicitud' };
 
     } catch (error) {
-        console.error('❌ Error llamando al orquestador:', error);
-        return { success: false, message: 'Error procesando la solicitud: ' + error.message };
+        console.error('❌ Error orquestador:', error);
+        return { success: false, message: 'Error: ' + error.message };
     }
 }
 
@@ -696,6 +738,11 @@ exports.disconnect = async (req, res) => {
         for (const key of conversationCache.keys()) {
             if (key.startsWith(tenantId)) {
                 conversationCache.delete(key);
+            }
+        }
+        for (const key of bookingContextCache.keys()) {
+            if (key.startsWith(tenantId)) {
+                bookingContextCache.delete(key);
             }
         }
 
