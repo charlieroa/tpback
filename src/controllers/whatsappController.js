@@ -5,7 +5,7 @@ const wahaService = require('../services/wahaService');
 const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
 
-console.log('🚀 [DEBUG] whatsappController.js cargado v6 (Orquestador + Contexto + Listar Estilistas)');
+console.log('🚀 [DEBUG] whatsappController.js cargado v7 (Flujo Corregido: Servicio → Fecha → Estilista)');
 
 const TIME_ZONE = 'America/Bogota';
 
@@ -334,7 +334,7 @@ exports.handleWahaWebhook = async (req, res) => {
             let bookingContext = bookingContextCache.get(cacheKey) || {};
 
             // Reinicio de conversación
-            const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello)[\s!.]*$/i;
+            const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello|ola)[\s!.]*$/i;
             const resetCommands = /(empezar de nuevo|cancelar|reset|reiniciar|nueva cita|otro servicio)/i;
 
             if ((simpleGreetings.test(userMessage.trim()) || resetCommands.test(userMessage.trim())) && conversationHistory.length > 0) {
@@ -470,80 +470,132 @@ exports.handleWahaWebhook = async (req, res) => {
 async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, bookingContext, senderName, tenantName) {
     const hoyStr = formatInTimeZone(new Date(), TIME_ZONE, "EEEE d 'de' MMMM 'de' yyyy", { locale: require('date-fns/locale/es') });
 
-    // Contexto actual de la reserva
+    // Contexto actual de la reserva - SOLO mostrar datos CONFIRMADOS
     let contextInfo = '';
     if (Object.keys(bookingContext).length > 0) {
         const parts = [];
-        if (bookingContext.service) parts.push(`- Servicio: ${bookingContext.service}`);
-        if (bookingContext.stylist) parts.push(`- Estilista sugerido: ${bookingContext.stylist}`);
+        if (bookingContext.service_confirmed) parts.push(`✅ Servicio CONFIRMADO: ${bookingContext.service}`);
         if (bookingContext.date) parts.push(`- Fecha: ${bookingContext.date}`);
         if (bookingContext.time) parts.push(`- Hora: ${bookingContext.time}`);
+        if (bookingContext.stylist) parts.push(`- Estilista: ${bookingContext.stylist}`);
         if (parts.length > 0) {
-            contextInfo = `\n\n📋 DATOS YA RECOPILADOS (NO pedir de nuevo):\n${parts.join('\n')}`;
+            contextInfo = `\n\n📋 DATOS DE LA RESERVA EN PROGRESO:\n${parts.join('\n')}`;
         }
     }
 
     // =====================================================
-    // 🔴 SYSTEM PROMPT MEJORADO CON MANEJO DE CAMBIO DE ESTILISTA
+    // 🔴 SYSTEM PROMPT v7 - FLUJO ESTRICTO
     // =====================================================
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
 
-FUNCIÓN DISPONIBLE: "consultar_orquestador" - Úsala para TODO sobre servicios/citas.
+FUNCIÓN: "consultar_orquestador" - DEBES usarla para TODO sobre servicios y citas.
 
-REGLAS CRÍTICAS:
-1. SIEMPRE usa el orquestador - NUNCA inventes datos
-2. Incluye TODOS los datos que ya tienes en cada llamada (servicio, fecha, hora)
-3. Respuestas CORTAS (1-2 oraciones)
-4. "sí"/"dale"/"confirmo" después de resumen → action="agendar"
-5. NO repitas preguntas sobre datos que ya tienes
+═══════════════════════════════════════════════════════════════
+🔴 REGLA CRÍTICA #1: SIEMPRE VERIFICA EL SERVICIO PRIMERO
+═══════════════════════════════════════════════════════════════
+Cuando el usuario mencione CUALQUIER servicio (corte, manicure, etc.):
+1. INMEDIATAMENTE llama al orquestador con solo el servicio
+2. NO preguntes fecha/hora hasta que el servicio esté 100% confirmado
+3. Si hay múltiples opciones → muéstralas y espera que elija
+4. SOLO cuando el servicio sea único/confirmado → pregunta fecha
 
-🔴 DETECCIÓN DE CAMBIO DE ESTILISTA (MUY IMPORTANTE):
-Si el usuario dice CUALQUIERA de estas frases:
-- "qué otro estilista" / "otro estilista" / "quién más" / "hay otro"
-- "no quiero con ese" / "prefiero otro" / "alguien más" / "otra persona"
-- "cambiar estilista" / "otro profesional" / "diferentes opciones"
-- "no me gusta ese" / "quiero elegir" / "ver opciones"
+EJEMPLO CORRECTO:
+- Usuario: "quiero un corte"
+- Tú: [llamas orquestador con service="corte"]
+- Orquestador: disambiguation_needed (Corte Caballero, Barba más corte)
+- Tú: "Tenemos Corte Caballero y Barba más corte. ¿Cuál prefieres?"
+- Usuario: "Corte caballero"
+- Tú: [llamas orquestador con service="Corte Caballero"]
+- Orquestador: need_date
+- Tú: "¿Para qué fecha quieres el Corte Caballero?"
 
-ENTONCES debes llamar al orquestador con:
-- action: "listar_estilistas_disponibles"  ← IMPORTANTE: usa esta action
-- service: el servicio actual del contexto
-- date: la fecha actual del contexto
-- time: la hora actual del contexto
-- SIN stylist NI selected_stylist_id ← NO envíes el estilista actual
+EJEMPLO INCORRECTO (NO HACER):
+- Usuario: "quiero un corte"
+- Tú: "Perfecto, ¿para qué fecha?" ❌ (NO preguntar fecha sin confirmar servicio)
 
-Esto devolverá una lista de TODOS los estilistas disponibles para que el cliente elija.
+═══════════════════════════════════════════════════════════════
+🔴 REGLA CRÍTICA #2: FLUJO OBLIGATORIO
+═══════════════════════════════════════════════════════════════
+PASO 1: SERVICIO (obligatorio primero)
+- Siempre verificar/confirmar servicio antes de todo
+- Si hay múltiples opciones, el usuario DEBE elegir una
 
-FLUJO NORMAL:
-- Sin servicio → pregunta servicio
-- Con servicio, sin fecha → pregunta fecha  
-- Con todo → muestra resumen y pide confirmación
-- Confirmación recibida → agenda con action="agendar"
-- Usuario pide otro estilista → action="listar_estilistas_disponibles"`;
+PASO 2: FECHA (solo después de servicio confirmado)
+- Preguntar fecha solo cuando el servicio esté claro
+
+PASO 3: HORA (solo después de fecha)
+- Preguntar hora o usar la que el usuario dio
+
+PASO 4: ESTILISTA (automático o elegir)
+- Mostrar estilistas disponibles
+- Usuario elige o se asigna el primero
+
+PASO 5: CONFIRMAR Y AGENDAR
+- Mostrar resumen
+- Con confirmación → action="agendar"
+
+═══════════════════════════════════════════════════════════════
+🔴 REGLA CRÍTICA #3: CAMBIO DE ESTILISTA
+═══════════════════════════════════════════════════════════════
+Si el usuario dice: "otro estilista", "quién más", "hay otro", "cambiar estilista"
+→ Usa action="listar_estilistas_disponibles" SIN enviar stylist actual
+
+═══════════════════════════════════════════════════════════════
+OTRAS REGLAS:
+═══════════════════════════════════════════════════════════════
+- Respuestas CORTAS (1-3 oraciones máximo)
+- "sí"/"dale"/"confirmo"/"listo" = confirmación → action="agendar"
+- NUNCA inventes servicios, estilistas o disponibilidad
+- SIEMPRE usa el orquestador para verificar datos`;
 
     // =====================================================
-    // FUNCTIONS CON LA NUEVA ACTION
+    // FUNCTIONS
     // =====================================================
     const FUNCTIONS = [
         {
             type: "function",
             function: {
                 name: "consultar_orquestador",
-                description: "Consulta servicios, disponibilidad y agenda citas. SIEMPRE incluye los datos del contexto actual. Usa action='listar_estilistas_disponibles' cuando el usuario quiera ver otros estilistas.",
+                description: `Consulta servicios, verifica disponibilidad y agenda citas. 
+                
+IMPORTANTE: 
+- Si el usuario menciona un servicio → llama con SOLO el servicio primero
+- Si hay múltiples servicios similares → el orquestador devolverá las opciones
+- NO envíes fecha/hora hasta que el servicio esté confirmado
+- Para cambiar estilista → usa action="listar_estilistas_disponibles" sin stylist`,
                 parameters: {
                     type: "object",
                     properties: {
                         action: {
                             type: "string",
                             enum: ["orchestrate", "agendar", "listar_estilistas_disponibles"],
-                            description: "orchestrate=consultar/verificar, agendar=confirmar cita, listar_estilistas_disponibles=ver todos los estilistas disponibles para esa fecha/hora (usar cuando el usuario pide 'otro estilista')"
+                            description: "orchestrate=consultar/verificar, agendar=confirmar cita, listar_estilistas_disponibles=ver otros estilistas"
                         },
-                        service: { type: "string", description: "Nombre del servicio" },
-                        selected_service_id: { type: "string", description: "UUID del servicio" },
-                        stylist: { type: "string", description: "Nombre del estilista (NO enviar si action=listar_estilistas_disponibles)" },
-                        selected_stylist_id: { type: "string", description: "UUID del estilista (NO enviar si action=listar_estilistas_disponibles)" },
-                        date: { type: "string", description: "hoy/mañana/YYYY-MM-DD" },
-                        time: { type: "string", description: "5pm/17:00/etc" }
+                        service: {
+                            type: "string",
+                            description: "Nombre del servicio. Enviar PRIMERO y SOLO para verificar antes de pedir fecha."
+                        },
+                        selected_service_id: {
+                            type: "string",
+                            description: "UUID del servicio (si ya fue confirmado)"
+                        },
+                        stylist: {
+                            type: "string",
+                            description: "Nombre del estilista (NO enviar si action=listar_estilistas_disponibles)"
+                        },
+                        selected_stylist_id: {
+                            type: "string",
+                            description: "UUID del estilista"
+                        },
+                        date: {
+                            type: "string",
+                            description: "Fecha: hoy/mañana/YYYY-MM-DD. SOLO enviar después de confirmar servicio."
+                        },
+                        time: {
+                            type: "string",
+                            description: "Hora: 5pm/17:00/9am. SOLO enviar después de confirmar servicio."
+                        }
                     }
                 }
             }
@@ -552,7 +604,7 @@ FLUJO NORMAL:
 
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
-        ...conversationHistory.slice(-10),
+        ...conversationHistory.slice(-12),
         { role: 'user', content: userMessage }
     ];
 
@@ -567,8 +619,8 @@ FLUJO NORMAL:
             messages,
             tools: FUNCTIONS,
             tool_choice: 'auto',
-            temperature: 0.5,
-            max_tokens: 300
+            temperature: 0.3,  // Más bajo para seguir mejor las instrucciones
+            max_tokens: 350
         })
     });
 
@@ -585,41 +637,60 @@ FLUJO NORMAL:
         const functionArgs = JSON.parse(toolCall.function.arguments || '{}');
 
         console.log(`   🔧 [FUNCIÓN] consultar_orquestador`);
-        console.log(`   📦 [ARGS]:`, JSON.stringify(functionArgs));
+        console.log(`   📦 [ARGS RAW]:`, JSON.stringify(functionArgs));
 
         // =====================================================
-        // 🔴 LÓGICA MEJORADA PARA LISTAR ESTILISTAS
+        // LÓGICA DE MERGE INTELIGENTE
         // =====================================================
         const isListingStylists = functionArgs.action === 'listar_estilistas_disponibles';
 
-        // Si está pidiendo listar estilistas, NO mezclar el stylist del contexto
+        // Solo incluir datos del contexto si el servicio ya está confirmado
+        const serviceConfirmed = bookingContext.service_confirmed === true;
+
         const mergedArgs = {
-            ...functionArgs,
-            service: functionArgs.service || bookingContext.service || '',
-            selected_service_id: functionArgs.selected_service_id || bookingContext.service_id || '',
-            // Solo incluir stylist si NO está listando
+            action: functionArgs.action || 'orchestrate',
+            // Servicio: usar el nuevo si viene, o el del contexto si está confirmado
+            service: functionArgs.service || (serviceConfirmed ? bookingContext.service : ''),
+            selected_service_id: functionArgs.selected_service_id || (serviceConfirmed ? bookingContext.service_id : ''),
+            // Fecha y hora: solo si el servicio está confirmado
+            date: serviceConfirmed ? (functionArgs.date || bookingContext.date || '') : (functionArgs.date || ''),
+            time: serviceConfirmed ? (functionArgs.time || bookingContext.time || '') : (functionArgs.time || ''),
+            // Estilista: no incluir si está listando
             stylist: isListingStylists ? '' : (functionArgs.stylist || bookingContext.stylist || ''),
             selected_stylist_id: isListingStylists ? '' : (functionArgs.selected_stylist_id || bookingContext.stylist_id || ''),
-            date: functionArgs.date || bookingContext.date || '',
-            time: functionArgs.time || bookingContext.time || ''
         };
 
         console.log(`   📦 [MERGED]:`, JSON.stringify(mergedArgs));
-        console.log(`   🔍 [ACTION]: ${functionArgs.action}, isListingStylists: ${isListingStylists}`);
+        console.log(`   🔍 [FLAGS] serviceConfirmed: ${serviceConfirmed}, isListingStylists: ${isListingStylists}`);
 
         const orchestratorResult = await callOrchestrator(mergedArgs, tenantId, clientId);
 
-        console.log(`   📋 [ORQUESTADOR]:`, JSON.stringify(orchestratorResult).substring(0, 400));
+        console.log(`   📋 [ORQUESTADOR]:`, JSON.stringify(orchestratorResult).substring(0, 500));
 
-        // Extraer contexto actualizado
+        // =====================================================
+        // EXTRAER Y ACTUALIZAR CONTEXTO
+        // =====================================================
         let updatedContext = {};
 
-        if (orchestratorResult.summary) {
-            if (orchestratorResult.summary.service) {
-                updatedContext.service = orchestratorResult.summary.service.name;
-                updatedContext.service_id = orchestratorResult.summary.service.id;
+        // Si el orquestador confirmó un servicio único
+        if (orchestratorResult.status === 'need_date' ||
+            orchestratorResult.status === 'need_time' ||
+            orchestratorResult.status === 'choose_time' ||
+            orchestratorResult.status === 'confirm' ||
+            orchestratorResult.status === 'booked') {
+
+            // El servicio está confirmado
+            if (orchestratorResult.summary?.service || orchestratorResult.service) {
+                const svc = orchestratorResult.summary?.service || orchestratorResult.service;
+                updatedContext.service = svc.name;
+                updatedContext.service_id = svc.id;
+                updatedContext.service_confirmed = true;  // Flag importante
             }
-            if (orchestratorResult.summary.stylist) {
+        }
+
+        // Actualizar otros datos del contexto
+        if (orchestratorResult.summary) {
+            if (orchestratorResult.summary.stylist && !isListingStylists) {
                 updatedContext.stylist = orchestratorResult.summary.stylist.name;
                 updatedContext.stylist_id = orchestratorResult.summary.stylist.id;
             }
@@ -627,20 +698,10 @@ FLUJO NORMAL:
             if (orchestratorResult.summary.time) updatedContext.time = orchestratorResult.summary.time;
         }
 
-        if (orchestratorResult.service) {
-            updatedContext.service = orchestratorResult.service.name;
-            updatedContext.service_id = orchestratorResult.service.id;
-        }
-
-        // Si devolvió lista de estilistas, NO actualizar el stylist en contexto
-        // para que el usuario pueda elegir
+        // Si devolvió lista de estilistas, limpiar estilista del contexto
         if (orchestratorResult.status === 'choose_stylist') {
-            // Mantener servicio, fecha y hora pero limpiar estilista
             updatedContext.stylist = null;
             updatedContext.stylist_id = null;
-        } else if (orchestratorResult.stylist) {
-            updatedContext.stylist = orchestratorResult.stylist.name;
-            updatedContext.stylist_id = orchestratorResult.stylist.id;
         }
 
         if (orchestratorResult.status === 'booked') {
@@ -663,8 +724,8 @@ FLUJO NORMAL:
             body: JSON.stringify({
                 model: 'gpt-4o-mini',
                 messages: followUpMessages,
-                temperature: 0.5,
-                max_tokens: 300
+                temperature: 0.3,
+                max_tokens: 350
             })
         });
 
@@ -694,14 +755,13 @@ async function callOrchestrator(args, tenantId, clientId) {
         const appointmentController = require('./appointmentController');
         const { findAvailableStylists } = require('../services/appointmentService');
 
-        // =====================================================
-        // 🔴 MANEJO ESPECIAL PARA LISTAR ESTILISTAS
-        // =====================================================
         const isListingStylists = args.action === 'listar_estilistas_disponibles';
 
         console.log(`   🔧 [ORQUESTADOR] Action: ${args.action}, ListingStylists: ${isListingStylists}`);
 
-        // Si está pidiendo listar estilistas Y tenemos servicio/fecha/hora
+        // =====================================================
+        // MANEJO ESPECIAL: LISTAR ESTILISTAS
+        // =====================================================
         if (isListingStylists && args.service && args.date && args.time) {
             try {
                 const allStylists = await findAvailableStylists(
@@ -726,7 +786,6 @@ async function callOrchestrator(args, tenantId, clientId) {
                     };
                 }
 
-                // Formatear lista de estilistas para el mensaje
                 const stylistNames = availableList.map((s, i) => `${i + 1}. ${s.name}`).join('\n');
 
                 return {
