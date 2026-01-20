@@ -4,6 +4,7 @@ const router = express.Router();
 
 const authMiddleware = require('../middleware/authMiddleware');
 const stylistController = require('../controllers/stylistController');
+const stylistAppController = require('../controllers/stylistAppController'); // ✅ Nuevo controlador para la App
 // Importamos el userController para reutilizar su handler searchStylists
 const userController = require('../controllers/userController');
 
@@ -26,6 +27,10 @@ router.get('/', authMiddleware, (req, res, next) => {
   req.params.tenantId = req.user.tenant_id;
   return stylistController.listStylistsByTenant(req, res, next);
 });
+
+// 📊 App Móvil: Dashboard & Ubicación
+router.get('/stats', authMiddleware, stylistAppController.getDashboardStats);
+router.post('/location', authMiddleware, stylistAppController.updateLocation);
 
 // 💇‍♀️ Servicios por estilista (después de las rutas específicas)
 router.get('/:id/services', authMiddleware, stylistController.getStylistServices);
