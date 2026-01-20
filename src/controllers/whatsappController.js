@@ -311,6 +311,8 @@ exports.handleWahaWebhook = async (req, res) => {
                 }
             }
 
+            let shouldShowStylists = false; // 🆕 Flag para mostrar estilistas automáticamente
+            
             if (extractedDateTime.date && !bookingContext.date) {
                 bookingContext.date = extractedDateTime.date;
                 contextUpdated = true;
@@ -320,6 +322,12 @@ exports.handleWahaWebhook = async (req, res) => {
                 if (bookingContext.service_id && bookingContext.stylist) {
                     shouldAutoCheck = true;
                     console.log(`   🎯 Tiene servicio + estilista + fecha → Puede verificar automáticamente`);
+                }
+                
+                // 🆕 Si tenemos servicio pero NO estilista, mostrar estilistas automáticamente
+                if (bookingContext.service_id && !bookingContext.stylist) {
+                    shouldShowStylists = true;
+                    console.log(`   🎯 Tiene servicio + fecha (sin estilista) → Debe mostrar estilistas automáticamente`);
                 }
             }
             if (extractedDateTime.time && !bookingContext.time) {
@@ -343,6 +351,9 @@ exports.handleWahaWebhook = async (req, res) => {
                 if (shouldAutoCheck) {
                     messageToProcess = `${userMessage}\n\n[NOTA: Ya tienes servicio + estilista + fecha en el contexto. Verifica disponibilidad automáticamente.]`;
                     console.log(`   📝 Mensaje procesado con hint de auto-verificación`);
+                } else if (shouldShowStylists) {
+                    messageToProcess = `${userMessage}\n\n[NOTA: Ya tienes servicio y fecha en el contexto. Muestra los estilistas disponibles automáticamente usando buscar_servicio. NO digas "He guardado la fecha" ni "Un momento, por favor". Muestra directamente los estilistas.]`;
+                    console.log(`   📝 Mensaje procesado con hint para mostrar estilistas`);
                 }
 
                 const result = await processWithAI(
@@ -493,12 +504,16 @@ PASO 1: BUSCAR SERVICIO PRIMERO - ⚠️ OBLIGATORIO
 - Si hay un solo servicio → guardar service_id y mostrar estilistas
 - ⚠️ CRÍTICO: Si el resultado tiene "stylists" con una lista, SOLO muestra esos estilistas. NO inventes estilistas. Si hay un "hint" que dice los nombres, usa SOLO esos nombres.
 
-PASO 2: ELEGIR ESTILISTA
-- Usuario elige estilista por nombre (ej: "sofia", "pedro", "carlos")
-- SI HAY FECHA EN CONTEXTO → verificar_disponibilidad INMEDIATAMENTE sin preguntar nada
-  → Ejemplo: [verificar_disponibilidad: serviceId="xxx", stylistName="sofia", date="2026-01-22"]
-  → Mostrar directamente los horarios: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00..."
-- SI NO HAY FECHA → preguntar: "¿Para qué fecha quieres tu cita con [nombre]?"
+PASO 2: ELEGIR ESTILISTA / FECHA
+- Si el usuario menciona una FECHA después de elegir servicio → Guardar fecha y MOSTRAR ESTILISTAS INMEDIATAMENTE
+  → NO digas "He guardado la fecha" ni "Un momento, por favor"
+  → Llama buscar_servicio con el service_id del contexto para obtener los estilistas
+  → Muestra directamente: "Estos estilistas ofrecen [servicio]: 1. [nombre], 2. [nombre]..."
+- Si el usuario elige estilista por nombre (ej: "sofia", "pedro", "carlos"):
+  - SI HAY FECHA EN CONTEXTO → verificar_disponibilidad INMEDIATAMENTE sin preguntar nada
+    → Ejemplo: [verificar_disponibilidad: serviceId="xxx", stylistName="sofia", date="2026-01-22"]
+    → Mostrar directamente los horarios: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00..."
+  - SI NO HAY FECHA → preguntar: "¿Para qué fecha quieres tu cita con [nombre]?"
 
 PASO 2.5: USUARIO MENCIONA HORA
 - Si el usuario dice una hora (ej: "a las 9", "9", "mañana a las 9") y ya hay estilista + fecha en contexto:
@@ -550,7 +565,15 @@ Usuario: "sofia"
 → RESPUESTA DIRECTA: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00, 14:00, 15:00. ¿Cuál prefieres?"
 → NO digas: "¿Para qué fecha?" (ya la tiene), NO digas "Voy a verificar"
 
-EJEMPLO 3 - Usuario menciona fecha después de elegir estilista:
+EJEMPLO 3A - Usuario menciona fecha después de elegir servicio (SIN estilista):
+Contexto: 📋 Servicio: Corte Caballero (sin fecha, sin estilista)
+Usuario: "para el viernes" o "para mañana"
+→ Se guarda fecha: 📅 2026-01-23
+→ AUTOMÁTICAMENTE: [buscar_servicio: service="Corte Caballero"] (usar service_id del contexto si es posible)
+→ Mostrar DIRECTAMENTE: "Estos estilistas ofrecen Corte Caballero: 1. Pedro, 2. Carlos, 3. Sofía. ¿Con cuál?"
+→ NO digas: "He guardado la fecha" ni "Un momento, por favor"
+
+EJEMPLO 3B - Usuario menciona fecha después de elegir estilista:
 Contexto: 📋 Servicio: Corte Caballero, 💇 Estilista: Sofía (sin fecha)
 Usuario: "para mañana"
 → Se guarda fecha: 📅 2026-01-21
