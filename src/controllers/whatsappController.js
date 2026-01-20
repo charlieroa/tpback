@@ -701,7 +701,10 @@ REGLA DE ORO:
 
         // Ejecutar la función correspondiente
         if (functionName === 'buscar_servicio') {
-            functionResult = await callSearchService(tenantId, functionArgs.service);
+            // 🆕 Pasar date y time si están disponibles en el contexto
+            const searchDate = bookingContext.date || extractedDateTime.date;
+            const searchTime = bookingContext.time || extractedDateTime.time;
+            functionResult = await callSearchService(tenantId, functionArgs.service, searchDate, searchTime);
 
             // Guardar servicio en contexto si se encontró un servicio único
             if (functionResult.found && functionResult.service && !functionResult.multiple) {
@@ -847,12 +850,12 @@ REGLA DE ORO:
 /* ==============   LLAMADAS A LOS ENDPOINTS   ======================= */
 /* =================================================================== */
 
-async function callSearchService(tenantId, service) {
+async function callSearchService(tenantId, service, date = null, time = null) {
     try {
         const whatsappBookingController = require('./Whatsappbookingcontroller');
 
         const mockReq = {
-            body: { tenantId, service }
+            body: { tenantId, service, date, time } // 🆕 Pasar date y time si están disponibles
         };
 
         let responseData = null;

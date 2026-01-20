@@ -654,6 +654,28 @@ function toLocalHHmm(utcDate) {
 }
 
 /**
+ * Convierte un Date UTC a hora local en formato 12 horas (h:mm a)
+ */
+function toLocal12Hour(utcDate) {
+  return formatInTimeZone(utcDate, TIME_ZONE, 'h:mm a', { locale: es });
+}
+
+/**
+ * Convierte una hora en formato 24h (HH:mm) a formato 12h (h:mm AM/PM)
+ */
+function convert24to12(hhmm24) {
+  if (!hhmm24 || typeof hhmm24 !== 'string') return '';
+  
+  const [hours, minutes] = hhmm24.split(':').map(Number);
+  if (isNaN(hours) || isNaN(minutes)) return '';
+  
+  const period = hours >= 12 ? 'PM' : 'AM';
+  const hours12 = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
+  
+  return `${hours12}:${String(minutes).padStart(2, '0')} ${period}`;
+}
+
+/**
  * Convierte un Date UTC a ISO local
  */
 function toLocalISO(utcDate) {
@@ -691,5 +713,7 @@ module.exports = {
   // Conversión de fechas/horas
   makeLocalUtc,
   toLocalHHmm,
+  toLocal12Hour,
+  convert24to12,
   toLocalISO,
 };

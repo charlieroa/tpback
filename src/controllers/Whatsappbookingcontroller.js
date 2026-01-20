@@ -28,7 +28,7 @@ console.log('🤖 [WHATSAPP BOOKING] Controlador v3.0 - MANEJA FECHA FALTANTE');
 
 exports.searchService = async (req, res) => {
     try {
-        const { tenantId, service } = req.body;
+        const { tenantId, service, date, time } = req.body; // 🆕 date y time opcionales
 
         if (!tenantId || !UUID_RE.test(tenantId)) {
             return res.status(400).json({ error: 'tenantId inválido (UUID requerido)' });
@@ -215,7 +215,33 @@ exports.searchService = async (req, res) => {
 
             if (exactMatch) {
                 console.log(`   ✅ Match exacto: ${exactMatch.name}`);
-                const stylists = await getAvailableStylists(tenantId, exactMatch.id);
+                let stylists = await getAvailableStylists(tenantId, exactMatch.id);
+
+                // 🆕 Si hay fecha y hora, filtrar solo estilistas disponibles a esa hora
+                if (date && time && stylists.length > 0) {
+                    console.log(`   🕐 Filtrando estilistas disponibles el ${date} a las ${time}...`);
+                    const normalizedTime = time.slice(0, 5);
+                    const availableStylists = [];
+
+                    for (const stylist of stylists) {
+                        try {
+                            const { slots } = await getAvailableSlotsForStylist(
+                                tenantId, stylist.id, exactMatch.id, date, 15
+                            );
+                            const filteredSlots = filterPastSlots(slots, date);
+                            const availableSlots = filteredSlots.map(toLocalHHmm);
+                            
+                            if (availableSlots.includes(normalizedTime)) {
+                                availableStylists.push(stylist);
+                            }
+                        } catch (err) {
+                            console.log(`   ⚠️ Error verificando disponibilidad de ${stylist.name}: ${err.message}`);
+                        }
+                    }
+
+                    stylists = availableStylists;
+                    console.log(`   ✅ ${stylists.length} estilistas disponibles a las ${normalizedTime}`);
+                }
 
                 return res.status(200).json({
                     found: true,
@@ -225,7 +251,9 @@ exports.searchService = async (req, res) => {
                         duration_minutes: Number(exactMatch.duration_minutes) || 60
                     },
                     stylists,
-                    message: `Estos estilistas ofrecen ${exactMatch.name}:`
+                    message: date && time
+                        ? `Estos estilistas están disponibles para "${exactMatch.name}" el ${date} a las ${time}:`
+                        : `Estos estilistas ofrecen ${exactMatch.name}:`
                 });
             }
 
@@ -261,7 +289,33 @@ exports.searchService = async (req, res) => {
         const serviceData = result.rows[0];
         console.log(`   ✅ Servicio encontrado: ${serviceData.name}`);
 
-        const stylists = await getAvailableStylists(tenantId, serviceData.id);
+        let stylists = await getAvailableStylists(tenantId, serviceData.id);
+
+        // 🆕 Si hay fecha y hora, filtrar solo estilistas disponibles a esa hora
+        if (date && time && stylists.length > 0) {
+            console.log(`   🕐 Filtrando estilistas disponibles el ${date} a las ${time}...`);
+            const normalizedTime = time.slice(0, 5); // Asegurar formato HH:mm
+            const availableStylists = [];
+
+            for (const stylist of stylists) {
+                try {
+                    const { slots } = await getAvailableSlotsForStylist(
+                        tenantId, stylist.id, serviceData.id, date, 15
+                    );
+                    const filteredSlots = filterPastSlots(slots, date);
+                    const availableSlots = filteredSlots.map(toLocalHHmm);
+                    
+                    if (availableSlots.includes(normalizedTime)) {
+                        availableStylists.push(stylist);
+                    }
+                } catch (err) {
+                    console.log(`   ⚠️ Error verificando disponibilidad de ${stylist.name}: ${err.message}`);
+                }
+            }
+
+            stylists = availableStylists;
+            console.log(`   ✅ ${stylists.length} estilistas disponibles a las ${normalizedTime}`);
+        }
 
         if (stylists.length === 0) {
             return res.status(200).json({
@@ -272,7 +326,9 @@ exports.searchService = async (req, res) => {
                     duration_minutes: Number(serviceData.duration_minutes) || 60
                 },
                 stylists: [],
-                message: `El servicio "${serviceData.name}" existe, pero no hay estilistas que lo ofrezcan actualmente.`
+                message: date && time
+                    ? `No hay estilistas disponibles para "${serviceData.name}" el ${date} a las ${time}.`
+                    : `El servicio "${serviceData.name}" existe, pero no hay estilistas que lo ofrezcan actualmente.`
             });
         }
 
@@ -286,7 +342,9 @@ exports.searchService = async (req, res) => {
                 duration_minutes: Number(serviceData.duration_minutes) || 60
             },
             stylists,
-            message: `Estos estilistas ofrecen ${serviceData.name}:`
+            message: date && time
+                ? `Estos estilistas están disponibles para "${serviceData.name}" el ${date} a las ${time}:`
+                : `Estos estilistas ofrecen ${serviceData.name}:`
         });
 
     } catch (error) {
