@@ -1,7 +1,7 @@
 // src/utils/appointmentHelpers.js
 'use strict';
 
-const { formatInTimeZone, toZonedTime, parseInTimeZone } = require('date-fns-tz');
+const { formatInTimeZone, toZonedTime, zonedTimeToUtc } = require('date-fns-tz');
 const { addDays, nextDay, parse, isValid, getDay } = require('date-fns');
 const { es } = require('date-fns/locale');
 
@@ -635,10 +635,11 @@ function buildSlotsFromRanges(dateStr, ranges, stepMinutes = 15) {
 function makeLocalUtc(dateStr, timeStr) {
   const t = timeStr && timeStr.length >= 5 ? timeStr.slice(0, 5) : '00:00';
   
-  // Crear fecha en zona horaria de Colombia usando date-fns-tz
-  // parseInTimeZone interpreta la fecha/hora como si estuviera en la zona horaria especificada
-  const localStr = `${dateStr} ${t}:00`;
-  const utcDate = parseInTimeZone(localStr, 'yyyy-MM-dd HH:mm:ss', TIME_ZONE);
+  // Crear fecha en zona horaria de Colombia usando zonedTimeToUtc
+  // zonedTimeToUtc interpreta la fecha/hora como si estuviera en la zona horaria especificada
+  // y devuelve el Date correspondiente en UTC
+  const localStr = `${dateStr}T${t}:00`;
+  const utcDate = zonedTimeToUtc(localStr, TIME_ZONE);
 
   return utcDate;
 }

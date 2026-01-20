@@ -27,7 +27,16 @@ function extractDateTimeFromMessage(message) {
     let normalizedMessage = message.toLowerCase()
         .replace(/ma[;:.,]ana/gi, 'mañana')      // ma;ana, ma:ana, ma.ana → mañana
         .replace(/manana/gi, 'mañana')           // manana → mañana
-        .replace(/ma[ñn]ana/gi, 'mañana');       // mañana, manana → mañana
+        .replace(/ma[ñn]ana/gi, 'mañana')        // mañana, manana → mañana
+        // 🆕 Normalizar días de la semana con typos comunes
+        .replace(/vien[rn]es/gi, 'viernes')      // vienres, viennes → viernes
+        .replace(/juev[ea]s/gi, 'jueves')        // juevas, juevss → jueves
+        .replace(/mi[eé]rcol[ea]s/gi, 'miércoles') // miercolas, miércoless → miércoles
+        .replace(/mier[ck]ol[ea]s/gi, 'miércoles') // mierkoles → miércoles
+        .replace(/mart[ea]s/gi, 'martes')        // martas → martes
+        .replace(/lun[ea]s/gi, 'lunes')          // lunas → lunes
+        .replace(/s[aá]bad[oa]/gi, 'sábado')     // sabada, sababo → sábado
+        .replace(/doming[oa]/gi, 'domingo');     // dominga → domingo
 
     console.log(`\n🔍 [EXTRACT] Analizando mensaje: "${message}"`);
     if (normalizedMessage !== message.toLowerCase()) {
