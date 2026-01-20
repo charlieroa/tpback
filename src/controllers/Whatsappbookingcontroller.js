@@ -10,6 +10,8 @@ const {
     clean,
     makeLocalUtc,
     toLocalHHmm,
+    toLocal12Hour,
+    convert24to12,
 } = require('../utils/appointmentHelpers');
 
 const {
@@ -424,9 +426,11 @@ exports.checkAvailability = async (req, res) => {
             }
 
             const availableSlots = filteredSlots.map(toLocalHHmm);
+            const availableSlots12h = filteredSlots.map(toLocal12Hour); // 🆕 Formato 12 horas para mensajes
 
             if (time) {
                 const isAvailable = availableSlots.includes(time.slice(0, 5));
+                const time12h = convert24to12(time.slice(0, 5)); // 🆕 Convertir hora solicitada a 12h
 
                 console.log(`   ${isAvailable ? '✅' : '❌'} Hora ${time}: ${isAvailable ? 'disponible' : 'NO disponible'}`);
 
@@ -437,9 +441,10 @@ exports.checkAvailability = async (req, res) => {
                     date,
                     time: time.slice(0, 5),
                     slots: isAvailable ? [time.slice(0, 5)] : availableSlots.slice(0, 10),
+                    slots_12h: isAvailable ? [time12h] : availableSlots12h.slice(0, 10), // 🆕 Formato 12h
                     message: isAvailable
-                        ? `${stylistNameFull} está disponible el ${date} a las ${time.slice(0, 5)}. ¿Confirmo tu cita?`
-                        : `${stylistNameFull} no está disponible el ${date} a las ${time.slice(0, 5)}. Horarios disponibles: ${availableSlots.slice(0, 6).join(', ')}. ¿Cuál prefieres?`
+                        ? `${stylistNameFull} está disponible el ${date} a las ${time12h}. ¿Confirmo tu cita?`
+                        : `${stylistNameFull} no está disponible el ${date} a las ${time12h}. Horarios disponibles: ${availableSlots12h.slice(0, 6).join(', ')}. ¿Cuál prefieres?`
                 });
             }
 
@@ -451,7 +456,8 @@ exports.checkAvailability = async (req, res) => {
                 service: { id: serviceId, name: serviceName, duration_minutes: duration },
                 date,
                 slots: availableSlots.slice(0, 20),
-                message: `${stylistNameFull} tiene disponible el ${date} en estos horarios: ${availableSlots.slice(0, 10).join(', ')}. ¿Cuál prefieres?`
+                slots_12h: availableSlots12h.slice(0, 20), // 🆕 Formato 12h
+                message: `${stylistNameFull} tiene disponible el ${date} en estos horarios: ${availableSlots12h.slice(0, 10).join(', ')}. ¿Cuál prefieres?`
             });
         }
 
@@ -479,22 +485,26 @@ exports.checkAvailability = async (req, res) => {
 
             if (filteredSlots.length > 0) {
                 const availableSlots = filteredSlots.map(toLocalHHmm);
+                const availableSlots12h = filteredSlots.map(toLocal12Hour); // 🆕 Formato 12h
 
                 if (time) {
                     const isAvailableAtTime = availableSlots.includes(time.slice(0, 5));
+                    const time12h = convert24to12(time.slice(0, 5)); // 🆕 Convertir a 12h
                     if (isAvailableAtTime) {
                         stylistsWithSlots.push({
                             id: stylistItem.id,
                             name: stylistItem.name,
                             available_at_requested_time: true,
-                            slots: [time.slice(0, 5)]
+                            slots: [time.slice(0, 5)],
+                            slots_12h: [time12h] // 🆕 Formato 12h
                         });
                     }
                 } else {
                     stylistsWithSlots.push({
                         id: stylistItem.id,
                         name: stylistItem.name,
-                        slots: availableSlots.slice(0, 10)
+                        slots: availableSlots.slice(0, 10),
+                        slots_12h: availableSlots12h.slice(0, 10) // 🆕 Formato 12h
                     });
                 }
             }
@@ -790,6 +800,8 @@ exports.bookAppointment = async (req, res) => {
             console.log(`   ⚠️ Socket no disponible:`, socketError.message);
         }
 
+        const time12h = toLocal12Hour(startTime); // 🆕 Formato 12 horas para el mensaje
+        
         return res.status(201).json({
             booked: true,
             appointment: {
@@ -798,9 +810,10 @@ exports.bookAppointment = async (req, res) => {
                 stylist: stylistNameFull,
                 date: formatInTimeZone(startTime, TIME_ZONE, 'yyyy-MM-dd'),
                 time: formatInTimeZone(startTime, TIME_ZONE, 'HH:mm'),
+                time_12h: time12h, // 🆕 Formato 12h
                 duration_minutes: duration
             },
-            message: `¡Listo! Tu cita de ${service.name} con ${stylistNameFull} quedó agendada para el ${formatInTimeZone(startTime, TIME_ZONE, "EEEE d 'de' MMMM", { locale: require('date-fns/locale/es') })} a las ${formatInTimeZone(startTime, TIME_ZONE, 'HH:mm')}.`
+            message: `¡Listo! Tu cita de ${service.name} con ${stylistNameFull} quedó agendada para el ${formatInTimeZone(startTime, TIME_ZONE, "EEEE d 'de' MMMM", { locale: require('date-fns/locale/es') })} a las ${time12h}.`
         });
 
     } catch (error) {

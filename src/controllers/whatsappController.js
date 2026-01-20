@@ -512,6 +512,7 @@ PASO 3: VERIFICAR DISPONIBILIDAD
   * Si está disponible: "[Nombre] tiene disponible [fecha] en estos horarios: [lista]"
   * Si NO está disponible: "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
   * Si no encuentra estilista: "No encontré [nombre]. Disponibles: [lista]"
+- ⚠️ IMPORTANTE: Usa el formato de 12 horas (AM/PM) para mostrar horarios. Si el resultado tiene "slots_12h", úsalo. Ejemplo: "9:00 AM", "2:00 PM", "12:00 PM"
 
 PASO 4: CONFIRMAR Y AGENDAR
 - Usuario elige hora → confirmar
