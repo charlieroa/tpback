@@ -514,10 +514,13 @@ PASO 3: VERIFICAR DISPONIBILIDAD
   * Si NO está disponible: "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
   * Si no encuentra estilista: "No encontré [nombre]. Disponibles: [lista]"
 - ⚠️ IMPORTANTE: Usa el formato de 12 horas (AM/PM) para mostrar horarios. Si el resultado tiene "slots_12h", úsalo. Ejemplo: "9:00 AM", "2:00 PM", "12:00 PM"
+- 🆕 CRÍTICO: Si muestras horarios en una lista numerada (1, 2, 3...) y el usuario responde con un número (ej: "1", "uno", "la 1"), debes entender que se refiere a la opción de esa lista, NO a la hora. Ejemplo: Si mostraste "1. 12:00 PM, 2. 1:00 PM" y el usuario dice "1", significa 12:00 PM, NO 1:00 PM.
 
 PASO 4: CONFIRMAR Y AGENDAR
 - Usuario elige hora → confirmar
-- Usuario dice "sí" → agendar_cita
+  * Si elige por número de lista (ej: "1" después de ver lista numerada) → mapear a la hora correspondiente
+  * Si dice la hora directamente (ej: "12:00 PM") → usar esa hora
+- Usuario dice "sí" o confirma → agendar_cita
 
 ═══════════════════════════════════════════════════════════════
 EJEMPLOS CORRECTOS:
@@ -550,6 +553,17 @@ Usuario: "a las 9" o "9" o "tipo 9"
 → [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="09:00"]
 → Si disponible: "Sí, Sofía está disponible mañana a las 9:00. ¿Confirmo tu cita?"
 → Si NO disponible: "Sofía no está disponible mañana a las 9:00. Horarios disponibles: 10:00, 11:00, 14:00. ¿Cuál prefieres?"
+
+EJEMPLO 5 - Usuario elige horario por número de lista:
+Contexto: Acabas de mostrar horarios numerados:
+  "1. 12:00 PM
+   2. 1:00 PM  
+   3. 1:15 PM
+   ¿Cuál prefieres?"
+Usuario: "1" o "uno" o "la 1"
+→ El usuario se refiere a la OPCIÓN 1 de la lista (12:00 PM), NO a la hora 1:00 PM
+→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="12:00"]
+→ "Perfecto, ¿confirmo tu cita para mañana a las 12:00 PM?"
 
 EJEMPLO 3 - Sin fecha previa:
 Contexto: 📋 Servicio: Corte Caballero (sin fecha)
