@@ -40,21 +40,37 @@ exports.searchService = async (req, res) => {
 
         // 🆕 Limpiar el nombre: remover palabras comunes como "de", "el", "la", "un", "una", "para"
         const stopWords = ['de', 'del', 'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'para', 'con', 'y', 'o'];
-        const serviceClean = clean(service).toLowerCase();
-        const serviceWords = serviceClean.split(/\s+/).filter(word => !stopWords.includes(word));
-        const serviceName = serviceWords.join(' '); // "corte de caballero" → "corte caballero"
+        const serviceClean = clean(service).toLowerCase().trim();
+        const serviceWords = serviceClean.split(/\s+/).filter(word => !stopWords.includes(word) && word.length > 0);
+        const serviceName = serviceWords.join(' ').trim(); // "corte de caballero" → "corte caballero"
+        
+        // 🆕 Normalizar acentos para búsqueda más flexible
+        const normalizeAccents = (str) => {
+            if (!str) return '';
+            return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+        };
+        const serviceNameNormalized = normalizeAccents(serviceName);
         
         console.log(`\n🔍 [SEARCH SERVICE] Buscando: "${service}"`);
         console.log(`   Limpio: "${serviceName}" (palabras: ${serviceWords.join(', ')})`);
+        console.log(`   Normalizado (sin acentos): "${serviceNameNormalized}"`);
+        
+        // 🆕 También buscar la versión original completa (por si el usuario escribe exacto)
+        const serviceOriginal = clean(service).toLowerCase().trim();
 
-        // Si solo quedó "servicio" o está vacío, mostrar todos los servicios
+        // Si solo quedó "servicio" o está vacío, mostrar todos los servicios CON ESTILISTAS ASIGNADOS
         if (!serviceName || serviceName === 'servicio' || serviceWords.length === 0) {
-            console.log(`   ℹ️ Búsqueda genérica - mostrando todos los servicios`);
+            console.log(`   ℹ️ Búsqueda genérica - mostrando servicios con estilistas asignados`);
             const allServices = await db.query(
-                `SELECT id, name, duration_minutes
-                 FROM services
-                 WHERE tenant_id = $1
-                 ORDER BY name ASC
+                `SELECT DISTINCT s.id, s.name, s.duration_minutes
+                 FROM services s
+                 INNER JOIN stylist_services ss ON s.id = ss.service_id
+                 INNER JOIN users u ON ss.user_id = u.id
+                 WHERE s.tenant_id = $1
+                   AND u.tenant_id = $1
+                   AND u.role_id = 3
+                   AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'
+                 ORDER BY s.name ASC
                  LIMIT 20`,
                 [tenantId]
             );
@@ -62,7 +78,7 @@ exports.searchService = async (req, res) => {
             if (allServices.rows.length === 0) {
                 return res.status(200).json({
                     found: false,
-                    message: 'No hay servicios disponibles en este momento.'
+                    message: 'No hay servicios disponibles con estilistas asignados en este momento.'
                 });
             }
 
@@ -78,47 +94,103 @@ exports.searchService = async (req, res) => {
             });
         }
 
-        // Buscar primero con el nombre limpio
+        // Buscar primero con múltiples variantes del nombre - SOLO servicios con estilistas asignados
         let result = await db.query(
-            `SELECT id, name, duration_minutes
-             FROM services
-             WHERE tenant_id = $1
-               AND LOWER(name) LIKE $2
+            `SELECT DISTINCT s.id, s.name, s.duration_minutes
+             FROM services s
+             INNER JOIN stylist_services ss ON s.id = ss.service_id
+             INNER JOIN users u ON ss.user_id = u.id
+             WHERE s.tenant_id = $1
+               AND u.tenant_id = $1
+               AND u.role_id = 3
+               AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'
+               AND (
+                 LOWER(TRIM(s.name)) LIKE $2
+                 OR LOWER(TRIM(s.name)) LIKE $3
+                 OR LOWER(TRIM(s.name)) LIKE $4
+                 OR LOWER(TRIM(s.name)) = $5
+               )
              ORDER BY 
                CASE 
-                 WHEN LOWER(name) = $3 THEN 1
-                 WHEN LOWER(name) LIKE $3 || '%' THEN 2
-                 ELSE 3
+                 WHEN LOWER(TRIM(s.name)) = $6 THEN 1
+                 WHEN LOWER(TRIM(s.name)) = $7 THEN 2
+                 WHEN LOWER(TRIM(s.name)) LIKE $8 || '%' THEN 3
+                 WHEN LOWER(TRIM(s.name)) LIKE $9 || '%' THEN 4
+                 ELSE 5
                END,
-               name ASC
-             LIMIT 5`,
-            [tenantId, `%${serviceName}%`, serviceName]
+               s.name ASC
+             LIMIT 10`,
+            [
+                tenantId, 
+                `%${serviceName}%`,           // Búsqueda con palabras sin stop words
+                `%${serviceNameNormalized}%`, // Búsqueda normalizada (sin acentos)
+                `%${serviceOriginal}%`,       // Búsqueda con texto original completo
+                serviceName,                  // Match exacto limpio
+                serviceName,                  // Para ordenamiento
+                serviceOriginal,              // Para ordenamiento
+                serviceName,                  // Para ordenamiento LIKE
+                serviceOriginal               // Para ordenamiento LIKE
+            ]
         );
+        
+        console.log(`   📊 Resultados encontrados: ${result.rows.length}`);
+        if (result.rows.length > 0) {
+            console.log(`   Servicios encontrados:`, result.rows.map(r => r.name));
+        }
 
-        // Si no hay resultados, buscar con cada palabra individualmente
+        // Si no hay resultados, buscar palabra por palabra (todas deben aparecer)
         if (result.rows.length === 0 && serviceWords.length > 0) {
-            console.log(`   🔄 Buscando con palabras individuales...`);
+            console.log(`   🔄 Buscando con palabras individuales (todas deben aparecer)...`);
             
-            // Construir condición OR para cada palabra
-            const wordConditions = serviceWords.map((_, i) => `LOWER(name) LIKE $${i + 2}`).join(' AND ');
-            const wordPatterns = serviceWords.map(w => `%${w}%`);
+            // Normalizar cada palabra y crear patrones de búsqueda
+            const wordConditions = [];
+            const params = [tenantId]; // $1 = tenantId
+            
+            // Cada palabra debe aparecer en el nombre (normalizada)
+            for (let i = 0; i < serviceWords.length; i++) {
+                const word = serviceWords[i];
+                const wordNormalized = normalizeAccents(word);
+                const paramIndex1 = params.length + 1; // Empezar desde $2
+                const paramIndex2 = params.length + 2;
+                
+                wordConditions.push(`(
+                    LOWER(s.name) LIKE $${paramIndex1}
+                    OR LOWER(s.name) LIKE $${paramIndex2}
+                )`);
+                params.push(`%${word}%`);
+                params.push(`%${wordNormalized}%`);
+            }
             
             result = await db.query(
-                `SELECT id, name, duration_minutes
-                 FROM services
-                 WHERE tenant_id = $1 AND (${wordConditions})
-                 ORDER BY name ASC
-                 LIMIT 5`,
-                [tenantId, ...wordPatterns]
+                `SELECT DISTINCT s.id, s.name, s.duration_minutes
+                 FROM services s
+                 INNER JOIN stylist_services ss ON s.id = ss.service_id
+                 INNER JOIN users u ON ss.user_id = u.id
+                 WHERE s.tenant_id = $1
+                   AND u.tenant_id = $1
+                   AND u.role_id = 3
+                   AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'
+                   AND ${wordConditions.join(' AND ')}
+                 ORDER BY s.name ASC
+                 LIMIT 10`,
+                params
             );
         }
 
         if (result.rows.length === 0) {
             console.log(`   ❌ No se encontró servicio`);
             
-            // Buscar servicios similares para sugerir
+            // Buscar servicios similares para sugerir - SOLO con estilistas asignados
             const suggestions = await db.query(
-                `SELECT name FROM services WHERE tenant_id = $1 ORDER BY name LIMIT 10`,
+                `SELECT DISTINCT s.name 
+                 FROM services s
+                 INNER JOIN stylist_services ss ON s.id = ss.service_id
+                 INNER JOIN users u ON ss.user_id = u.id
+                 WHERE s.tenant_id = $1
+                   AND u.tenant_id = $1
+                   AND u.role_id = 3
+                   AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'
+                 ORDER BY s.name LIMIT 10`,
                 [tenantId]
             );
             const suggestionNames = suggestions.rows.map(s => s.name);
@@ -131,7 +203,13 @@ exports.searchService = async (req, res) => {
         }
 
         if (result.rows.length > 1) {
-            const exactMatch = result.rows.find(s => s.name.toLowerCase() === serviceName);
+            // Buscar match exacto (con o sin acentos normalizados, sin importar mayúsculas)
+            const exactMatch = result.rows.find(s => {
+                const sName = s.name.toLowerCase().trim();
+                const sNameNormalized = normalizeAccents(s.name.toLowerCase().trim());
+                const searchNormalized = serviceNameNormalized.trim();
+                return sName === serviceName.trim() || sNameNormalized === searchNormalized;
+            });
 
             if (exactMatch) {
                 console.log(`   ✅ Match exacto: ${exactMatch.name}`);
@@ -149,16 +227,32 @@ exports.searchService = async (req, res) => {
                 });
             }
 
-            console.log(`   ⚠️ Múltiples coincidencias: ${result.rows.length}`);
+            // Si no hay match exacto pero hay resultados similares, mostrarlos
+            console.log(`   ⚠️ Múltiples coincidencias (${result.rows.length}):`, result.rows.map(r => r.name));
+            
+            // Ordenar por relevancia: los que más se parezcan primero
+            const sortedResults = result.rows.sort((a, b) => {
+                const aNorm = normalizeAccents(a.name.toLowerCase());
+                const bNorm = normalizeAccents(b.name.toLowerCase());
+                const searchNorm = serviceNameNormalized;
+                
+                // Priorizar los que empiecen con el texto buscado
+                if (aNorm.startsWith(searchNorm) && !bNorm.startsWith(searchNorm)) return -1;
+                if (!aNorm.startsWith(searchNorm) && bNorm.startsWith(searchNorm)) return 1;
+                
+                // Luego por longitud (más cortos primero si tienen el mismo inicio)
+                return a.name.length - b.name.length;
+            });
+            
             return res.status(200).json({
-                found: false,
+                found: true, // 🆕 Cambiado a true - SÍ encontramos servicios
                 multiple: true,
-                options: result.rows.map(s => ({
+                options: sortedResults.map(s => ({
                     id: s.id,
                     name: s.name,
                     duration_minutes: Number(s.duration_minutes) || 60
                 })),
-                message: `Encontré varios servicios. ¿Cuál prefieres?`
+                message: `Encontré estos servicios: ${sortedResults.map(s => s.name).join(', ')}. ¿Cuál prefieres?`
             });
         }
 

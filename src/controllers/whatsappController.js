@@ -703,8 +703,8 @@ REGLA DE ORO:
         if (functionName === 'buscar_servicio') {
             functionResult = await callSearchService(tenantId, functionArgs.service);
 
-            // Guardar servicio en contexto si se encontró
-            if (functionResult.found && functionResult.service) {
+            // Guardar servicio en contexto si se encontró un servicio único
+            if (functionResult.found && functionResult.service && !functionResult.multiple) {
                 updatedContext.service = functionResult.service.name;
                 updatedContext.service_id = functionResult.service.id;
                 console.log(`   ✅ Servicio guardado: ${functionResult.service.name} (${functionResult.service.id})`);
@@ -715,6 +715,12 @@ REGLA DE ORO:
                     functionResult.date_in_context = bookingContext.date;
                     functionResult.hint = `Nota: Ya tienes fecha guardada (${bookingContext.date}). Cuando el usuario elija estilista, usa esa fecha para verificar disponibilidad.`;
                 }
+            }
+            
+            // Si hay múltiples opciones pero found=true, mostrar las opciones al usuario
+            if (functionResult.found && functionResult.multiple && functionResult.options) {
+                console.log(`   📋 Servicios encontrados (múltiples): ${functionResult.options.map(o => o.name).join(', ')}`);
+                functionResult.hint = 'Muestra estas opciones al usuario para que elija. NO digas "no encontré", di "Encontré estos servicios: ..."';
             }
         }
         else if (functionName === 'verificar_disponibilidad') {

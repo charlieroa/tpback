@@ -647,30 +647,10 @@ function makeLocalUtc(dateStr, timeStr) {
 }
 
 /**
- * Convierte un Date UTC a hora local HH:mm (24 horas)
+ * Convierte un Date UTC a hora local HH:mm
  */
 function toLocalHHmm(utcDate) {
   return formatInTimeZone(utcDate, TIME_ZONE, 'HH:mm');
-}
-
-/**
- * Convierte un Date UTC a hora local en formato 12 horas (h:mm AM/PM)
- */
-function toLocal12Hour(utcDate) {
-  return formatInTimeZone(utcDate, TIME_ZONE, 'h:mm a', { locale: require('date-fns/locale/es') });
-}
-
-/**
- * Convierte HH:mm (24h) a formato 12 horas (h:mm AM/PM)
- */
-function convert24to12(hhmm24) {
-  if (!hhmm24 || typeof hhmm24 !== 'string') return hhmm24;
-  const [hours, minutes] = hhmm24.split(':').map(Number);
-  if (isNaN(hours) || isNaN(minutes)) return hhmm24;
-  
-  const period = hours >= 12 ? 'PM' : 'AM';
-  const hour12 = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-  return `${hour12}:${String(minutes).padStart(2, '0')} ${period}`;
 }
 
 /**
@@ -711,7 +691,5 @@ module.exports = {
   // Conversión de fechas/horas
   makeLocalUtc,
   toLocalHHmm,
-  toLocal12Hour,
-  convert24to12,
   toLocalISO,
 };
