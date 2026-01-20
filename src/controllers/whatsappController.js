@@ -353,7 +353,8 @@ exports.handleWahaWebhook = async (req, res) => {
                     conversationHistory,
                     bookingContext,
                     senderName,
-                    tenantName
+                    tenantName,
+                    extractedDateTime
                 );
 
                 if (result.updatedContext) {
@@ -451,7 +452,7 @@ exports.handleWahaWebhook = async (req, res) => {
 /* ==============   PROCESAR CON IA (OPENAI)   ======================= */
 /* =================================================================== */
 
-async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, bookingContext, senderName, tenantName) {
+async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, bookingContext, senderName, tenantName, extractedDateTime = { date: null, time: null }) {
     const hoyStr = formatInTimeZone(new Date(), TIME_ZONE, "EEEE d 'de' MMMM 'de' yyyy", { locale: require('date-fns/locale/es') });
 
     // Contexto actual CON IDs
@@ -701,9 +702,9 @@ REGLA DE ORO:
 
         // Ejecutar la función correspondiente
         if (functionName === 'buscar_servicio') {
-            // 🆕 Pasar date y time si están disponibles en el contexto
-            const searchDate = bookingContext.date || extractedDateTime.date;
-            const searchTime = bookingContext.time || extractedDateTime.time;
+            // 🆕 Pasar date y time si están disponibles en el contexto o en el mensaje extraído
+            const searchDate = bookingContext.date || extractedDateTime.date || null;
+            const searchTime = bookingContext.time || extractedDateTime.time || null;
             functionResult = await callSearchService(tenantId, functionArgs.service, searchDate, searchTime);
 
             // Guardar servicio en contexto si se encontró un servicio único
