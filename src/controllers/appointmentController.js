@@ -1499,6 +1499,10 @@ exports.scheduleWithFallback = async (req, res) => {
 /* =========================  AI ORCHESTRATOR  ======================= */
 /* =================================================================== */
 
+/* =================================================================== */
+/* =========================  AI ORCHESTRATOR (CORREGIDO)  =========== */
+/* =================================================================== */
+
 exports.aiOrchestratorPublic = async (req, res) => {
   try {
     const payload = { ...(req.query || {}), ...(req.body || {}) };
@@ -1515,6 +1519,10 @@ exports.aiOrchestratorPublic = async (req, res) => {
       step
     } = payload;
 
+    console.log('\n' + '═'.repeat(80));
+    console.log('🎯 [AI ORCHESTRATOR] Inicio de procesamiento');
+    console.log('═'.repeat(80));
+
     action = clean(action) || 'orchestrate';
     if (clean(payload.ai_intent) === 'agendar') action = 'agendar';
     if (String(confirm).toLowerCase() === 'true') action = 'agendar';
@@ -1524,30 +1532,66 @@ exports.aiOrchestratorPublic = async (req, res) => {
     const suggestLimit = Math.max(1, parseInt(limit || '6', 10));
     const stepMinutes = Math.max(5, parseInt(step || '15', 10));
 
+    console.log('📋 [PARAMS RAW]:');
+    console.log('   tenantId:', tenantId);
+    console.log('   action:', action);
+    console.log('   service:', service, '| service_id:', service_id, '| selected_service_id:', selected_service_id);
+    console.log('   stylist:', stylist, '| stylist_id:', stylist_id, '| selected_stylist_id:', selected_stylist_id);
+    console.log('   date (ANTES normalizar):', date);
+    console.log('   time (ANTES normalizar):', time);
+
     if (!tenantId || !UUID_RE.test(tenantId)) {
       return res.status(400).json({ error: 'Falta tenantId válido (UUID).' });
     }
 
-    date = normalizeDateKeyword(clean(date));
+    // 🎯 NORMALIZAR FECHA Y HORA
+    const dateOriginal = date;
+    const timeOriginal = time;
 
-    // 🔍 DEBUG: Ver valor original de time
-    console.log('⏰ [aiOrchestrator] Time ANTES de normalizar:', time);
+    date = normalizeDateKeyword(clean(date));
     time = normalizeHumanTimeToHHMM(time);
-    console.log('⏰ [aiOrchestrator] Time DESPUÉS de normalizar:', time);
+
+    console.log('\n📅 [NORMALIZACION]:');
+    console.log('   date: "' + dateOriginal + '" → "' + date + '"');
+    console.log('   time: "' + timeOriginal + '" → "' + time + '"');
+
+    // =================================================================
+    // PASO 1: RESOLVER SERVICIO
+    // =================================================================
+    console.log('\n🔍 [PASO 1] Resolviendo servicio...');
 
     const svc = await resolveServiceFuzzy(tenantId, { service, service_id, selected_service_id }, 10);
     let chosenService = svc.chosen;
     const serviceOptions = svc.options || [];
 
+    console.log('   Servicio elegido:', chosenService ? chosenService.name : 'ninguno');
+    console.log('   Opciones disponibles:', serviceOptions.length);
+
+    // =================================================================
+    // PASO 2: RESOLVER ESTILISTA (SI SE PROPORCIONÓ)
+    // =================================================================
+    console.log('\n🔍 [PASO 2] Resolviendo estilista...');
+
     const sty = await resolveStylistFuzzy(tenantId, { stylist, stylist_id, selected_stylist_id }, 10);
     let chosenStylist = sty.chosen;
     const stylistOptions = sty.options || [];
 
+    console.log('   Estilista elegido:', chosenStylist ? chosenStylist.name : 'ninguno');
+    console.log('   Opciones disponibles:', stylistOptions.length);
+
+    // =================================================================
+    // MANEJO DE DESAMBIGUACIÓN
+    // =================================================================
     const need = {
       service: !chosenService && serviceOptions.length > 0,
       stylist: !chosenStylist && stylistOptions.length > 0
     };
+
     if (need.service || need.stylist) {
+      console.log('⚠️ [DESAMBIGUACIÓN NECESARIA]');
+      console.log('   Servicios:', need.service ? 'SÍ' : 'NO');
+      console.log('   Estilistas:', need.stylist ? 'SÍ' : 'NO');
+
       return res.status(200).json({
         status: 'disambiguation_needed',
         message: 'Encontré múltiples coincidencias. Por favor elige una opción.',
@@ -1564,14 +1608,20 @@ exports.aiOrchestratorPublic = async (req, res) => {
       });
     }
 
+    // =================================================================
+    // VALIDAR QUE NO SE INVENTEN SERVICIOS/ESTILISTAS
+    // =================================================================
     if (!chosenService && clean(service)) {
+      console.log('❌ [SERVICIO NO ENCONTRADO]:', service);
       return res.status(200).json({
         status: 'no_match_service',
         message: `No encontré un servicio que coincida con "${service}".`,
         suggestions: []
       });
     }
+
     if (!chosenStylist && clean(stylist)) {
+      console.log('❌ [ESTILISTA NO ENCONTRADO]:', stylist);
       return res.status(200).json({
         status: 'no_match_stylist',
         message: `No encontré un estilista que coincida con "${stylist}".`,
@@ -1579,17 +1629,26 @@ exports.aiOrchestratorPublic = async (req, res) => {
       });
     }
 
-    // ✅ NUEVO: Si tengo estilista pero NO servicio, listar sus servicios
+    // =================================================================
+    // ✅ CASO ESPECIAL: TENGO ESTILISTA PERO NO SERVICIO
+    // → Listar servicios que ofrece ese estilista
+    // =================================================================
     if (chosenStylist && !chosenService) {
+      console.log('\n📋 [LISTAR SERVICIOS] Estilista sin servicio');
+      console.log('   Estilista:', chosenStylist.name);
+
       const stylistServices = await getStylistServices(chosenStylist.id);
 
       if (stylistServices.length === 0) {
+        console.log('   ⚠️ Estilista no tiene servicios configurados');
         return res.status(200).json({
           status: 'stylist_no_services',
           message: `${chosenStylist.name} no tiene servicios configurados.`,
           services: []
         });
       }
+
+      console.log('   ✅ Servicios encontrados:', stylistServices.length);
 
       return res.status(200).json({
         status: 'list_stylist_services',
@@ -1607,7 +1666,11 @@ exports.aiOrchestratorPublic = async (req, res) => {
       });
     }
 
+    // =================================================================
+    // VALIDAR QUE TENEMOS SERVICIO
+    // =================================================================
     if (!chosenService) {
+      console.log('⚠️ [NECESITA SERVICIO]');
       return res.status(200).json({
         status: 'need_service',
         message: '¿Qué servicio deseas?',
@@ -1615,13 +1678,24 @@ exports.aiOrchestratorPublic = async (req, res) => {
       });
     }
 
-    // Camino A: con estilista específico
+    console.log('\n✅ [SERVICIO CONFIRMADO]:', chosenService.name);
+
+    // =================================================================
+    // CAMINO A: CON ESTILISTA ESPECÍFICO
+    // =================================================================
     if (chosenStylist) {
+      console.log('\n🎯 [CAMINO A] Con estilista específico:', chosenStylist.name);
+
+      // Verificar que el estilista ofrece el servicio
       const offersService = await checkStylistOffersService(chosenStylist.id, chosenService.id);
+
       if (!offersService) {
+        console.log('   ❌ Estilista NO ofrece el servicio');
+
         // Obtener servicios que SÍ ofrece
         const stylistServices = await getStylistServices(chosenStylist.id);
 
+        // Buscar estilistas alternativos que SÍ ofrecen el servicio
         const alternosBase = await db.query(
           `SELECT u.id, u.first_name, u.last_name
            FROM users u
@@ -1647,10 +1721,16 @@ exports.aiOrchestratorPublic = async (req, res) => {
         });
       }
 
+      console.log('   ✅ Estilista SÍ ofrece el servicio');
+
       let duration = Number(chosenService.duration_minutes) || 60;
       duration = await getStylistEffectiveDuration(chosenStylist.id, chosenService.id, duration);
 
+      console.log('   Duración efectiva:', duration, 'minutos');
+
+      // Verificar si necesitamos fecha
       if (!date) {
+        console.log('   ⚠️ Falta fecha');
         return res.status(200).json({
           status: 'need_date',
           message: '¿Para qué fecha quieres agendar?',
@@ -1658,15 +1738,24 @@ exports.aiOrchestratorPublic = async (req, res) => {
         });
       }
 
+      console.log('   📅 Fecha:', date);
+
+      // Obtener slots disponibles
       const { slots, effectiveRanges, reason } = await getAvailableSlotsForStylist(
         tenantId, chosenStylist.id, chosenService.id, date, stepMinutes
       );
 
-      // ✅ FILTRAR HORARIOS PASADOS
+      console.log('   Slots totales:', slots.length);
+
+      // Filtrar horarios pasados
       const filteredSlots = filterPastSlots(slots, date);
+      console.log('   Slots después de filtrar pasados:', filteredSlots.length);
 
       if (filteredSlots.length === 0) {
         const isPastDay = slots.length > 0 && filteredSlots.length === 0;
+        console.log('   ❌ No hay slots disponibles');
+        console.log('   Razón:', isPastDay ? 'horarios pasados' : reason);
+
         return res.status(200).json({
           status: isPastDay ? 'all_slots_past' : (reason || 'no_availability'),
           message: isPastDay
@@ -1677,8 +1766,11 @@ exports.aiOrchestratorPublic = async (req, res) => {
       }
 
       const allLocalTimes = filteredSlots.map(toLocalHHmm);
+      console.log('   Horarios disponibles (primeros 10):', allLocalTimes.slice(0, 10));
 
+      // Verificar si necesitamos hora
       if (!time) {
+        console.log('   ⚠️ Falta hora');
         return res.status(200).json({
           status: 'choose_time',
           message: 'Estos son los horarios disponibles para ese día:',
@@ -1689,24 +1781,15 @@ exports.aiOrchestratorPublic = async (req, res) => {
       }
 
       const wanted = String(time).slice(0, 5);
-
-      // 🔍 DEBUG: Ver qué está comparando
-      console.log('🔍 [aiOrchestrator] Comparando disponibilidad:');
-      console.log('   wanted (hora solicitada):', wanted);
-      console.log('   allLocalTimes (primeros 10 slots):', allLocalTimes.slice(0, 10));
-      console.log('   ¿Está incluido?:', allLocalTimes.includes(wanted));
+      console.log('   ⏰ Hora solicitada:', wanted);
+      console.log('   ¿Está disponible?:', allLocalTimes.includes(wanted));
 
       const isAvailable = allLocalTimes.includes(wanted);
 
       if (!isAvailable) {
+        console.log('   ❌ Hora NO disponible');
+
         const wantedDate = makeLocalUtc(date, wanted);
-
-        // 🔍 DEBUG: Ver la fecha construida
-        console.log('🔍 [aiOrchestrator] Fecha construida:');
-        console.log('   date:', date);
-        console.log('   wanted:', wanted);
-        console.log('   wantedDate:', wantedDate.toISOString());
-
         const withDist = filteredSlots.map(d => ({ d, dist: Math.abs(d.getTime() - wantedDate.getTime()) }))
           .sort((a, b) => a.dist - b.dist);
 
@@ -1725,15 +1808,19 @@ exports.aiOrchestratorPublic = async (req, res) => {
         });
       }
 
-      // ✅ SI LLEGÓ AQUÍ, SÍ HAY DISPONIBILIDAD
+      // ✅ SÍ HAY DISPONIBILIDAD
+      console.log('   ✅ Hora disponible');
+
       const startTimeDate = makeLocalUtc(date, wanted);
       const endTimeDate = new Date(startTimeDate.getTime() + duration * 60000);
 
-      console.log('✅ [aiOrchestrator] DISPONIBLE - Preparando para confirmar');
-      console.log('   startTimeDate:', startTimeDate.toISOString());
-      console.log('   action:', action);
+      console.log('   Start time:', startTimeDate.toISOString());
+      console.log('   End time:', endTimeDate.toISOString());
 
+      // Si la acción es agendar, proceder
       if (action === 'agendar') {
+        console.log('\n🎉 [AGENDAMIENTO] Confirmando cita...');
+
         if (!clientId) {
           return res.status(400).json({ error: 'Para agendar se requiere clientId.' });
         }
@@ -1745,12 +1832,15 @@ exports.aiOrchestratorPublic = async (req, res) => {
             tenantId, clientId, chosenStylist.id, chosenService.id, startTimeDate, duration
           );
 
+          console.log('   ✅ Cita agendada exitosamente:', appointment.id);
+
           return res.status(201).json({
             status: 'booked',
             message: `¡Listo! Tu cita quedó con ${chosenStylist.name} el ${formatInTimeZone(startTimeDate, TIME_ZONE, 'yyyy-MM-dd')} a las ${formatInTimeZone(startTimeDate, TIME_ZONE, 'HH:mm')}.`,
             appointment
           });
         } catch (error) {
+          console.error('   ❌ Error al agendar:', error.message);
           return res.status(409).json({
             status: 'conflict_or_invalid',
             message: error.message || 'Se ocupó el turno mientras confirmabas. Elige otra hora.',
@@ -1758,6 +1848,9 @@ exports.aiOrchestratorPublic = async (req, res) => {
           });
         }
       }
+
+      // Mostrar confirmación
+      console.log('   📋 Solicitando confirmación al usuario');
 
       return res.status(200).json({
         status: 'confirm',
@@ -1773,15 +1866,22 @@ exports.aiOrchestratorPublic = async (req, res) => {
       });
     }
 
-    // Camino B: sin estilista específico
+    // =================================================================
+    // CAMINO B: SIN ESTILISTA ESPECÍFICO
+    // =================================================================
+    console.log('\n🎯 [CAMINO B] Sin estilista específico');
+
     if (!date) {
+      console.log('   ⚠️ Falta fecha');
       return res.status(200).json({
         status: 'need_date',
         message: '¿Para qué fecha quieres agendar?',
         hint: 'Puedes enviar "hoy" / "mañana" o YYYY-MM-DD.'
       });
     }
+
     if (!time) {
+      console.log('   ⚠️ Falta hora');
       return res.status(200).json({
         status: 'need_time',
         message: '¿Y a qué hora te gustaría?',
@@ -1789,9 +1889,16 @@ exports.aiOrchestratorPublic = async (req, res) => {
       });
     }
 
+    console.log('   📅 Fecha:', date);
+    console.log('   ⏰ Hora:', time);
+    console.log('   Buscando estilistas disponibles...');
+
     const availableStylists = await findAvailableStylists(tenantId, chosenService.name, date, time);
 
+    console.log('   Estilistas disponibles:', availableStylists.length);
+
     if (availableStylists.length === 0) {
+      console.log('   ❌ No hay estilistas disponibles');
       return res.status(200).json({
         status: 'no_stylist_available_at_time',
         message: `Lo siento, no encontré estilistas disponibles para "${chosenService.name}" a las ${time} ese día.`,
@@ -1806,6 +1913,8 @@ exports.aiOrchestratorPublic = async (req, res) => {
       name: `${firstAvailable.first_name} ${firstAvailable.last_name || ''}`.trim()
     };
 
+    console.log('   ✅ Estilista asignado:', chosenStylist.name);
+
     let duration = Number(chosenService.duration_minutes) || 60;
     duration = await getStylistEffectiveDuration(chosenStylist.id, chosenService.id, duration);
 
@@ -1813,6 +1922,8 @@ exports.aiOrchestratorPublic = async (req, res) => {
     const wanted = String(time).slice(0, 5);
 
     if (action === 'agendar') {
+      console.log('\n🎉 [AGENDAMIENTO] Confirmando cita...');
+
       if (!clientId) {
         return res.status(400).json({ error: 'Para agendar se requiere clientId.' });
       }
@@ -1824,18 +1935,23 @@ exports.aiOrchestratorPublic = async (req, res) => {
           tenantId, clientId, chosenStylist.id, chosenService.id, startTimeDate, duration
         );
 
+        console.log('   ✅ Cita agendada exitosamente:', appointment.id);
+
         return res.status(201).json({
           status: 'booked',
           message: `¡Listo! Tu cita quedó con ${chosenStylist.name} el ${formatInTimeZone(startTimeDate, TIME_ZONE, 'yyyy-MM-dd')} a las ${formatInTimeZone(startTimeDate, TIME_ZONE, 'HH:mm')}.`,
           appointment
         });
       } catch (error) {
+        console.error('   ❌ Error al agendar:', error.message);
         return res.status(409).json({
           status: 'conflict_or_invalid',
           message: error.message || '¡Uy! Justo se ocupó ese turno mientras confirmabas. ¿Intentamos de nuevo?'
         });
       }
     }
+
+    console.log('   📋 Solicitando confirmación al usuario');
 
     return res.status(200).json({
       status: 'confirm',
@@ -1851,8 +1967,11 @@ exports.aiOrchestratorPublic = async (req, res) => {
     });
 
   } catch (e) {
-    console.error('aiOrchestratorPublic', e);
+    console.error('\n❌ [AI ORCHESTRATOR ERROR]:', e);
+    console.error(e.stack);
     return res.status(500).json({ error: 'Error interno del servidor' });
+  } finally {
+    console.log('═'.repeat(80));
   }
 };
 

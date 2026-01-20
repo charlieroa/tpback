@@ -6,7 +6,7 @@ const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
 const { normalizeDateKeyword, normalizeHumanTimeToHHMM, isDateKeyword } = require('../utils/appointmentHelpers');
 
-console.log('🚀 [DEBUG] whatsappController.js cargado v8 (Extracción de fecha/hora del mensaje)');
+console.log('🚀 [DEBUG] whatsappController.js cargado v9 (Fixes completos de contexto y orquestador)');
 
 const TIME_ZONE = 'America/Bogota';
 
@@ -31,7 +31,7 @@ function extractDateTimeFromMessage(message) {
     const result = { date: null, time: null };
     const lower = message.toLowerCase();
 
-    console.log(`🔍 [EXTRACT] Analizando mensaje: "${message}"`);
+    console.log(`\n🔍 [EXTRACT] Analizando mensaje: "${message}"`);
 
     // ===== PATRONES DE FECHA =====
     const datePatterns = [
@@ -410,6 +410,10 @@ exports.handleWahaWebhook = async (req, res) => {
             let conversationHistory = conversationCache.get(cacheKey) || [];
             let bookingContext = bookingContextCache.get(cacheKey) || {};
 
+            // 🔍 DEBUG: Estado actual del contexto ANTES de procesar
+            console.log('\n📋 [CONTEXTO PRE-PROCESO] Estado actual:');
+            console.log('   bookingContext:', JSON.stringify(bookingContext, null, 2));
+
             // Reinicio de conversación
             const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello|ola)[\s!.]*$/i;
             const resetCommands = /(empezar de nuevo|cancelar|reset|reiniciar|nueva cita|otro servicio)/i;
@@ -427,17 +431,30 @@ exports.handleWahaWebhook = async (req, res) => {
             // ==========================================
             const extractedDateTime = extractDateTimeFromMessage(userMessage);
 
+            console.log('\n🔍 [PRE-EXTRACT] Resultado de extracción:');
+            console.log('   Fecha extraída:', extractedDateTime.date);
+            console.log('   Hora extraída:', extractedDateTime.time);
+            console.log('   Fecha en contexto actual:', bookingContext.date);
+            console.log('   Hora en contexto actual:', bookingContext.time);
+
+            // Solo actualizar contexto si NO existe ya (no sobrescribir)
+            let contextUpdated = false;
             if (extractedDateTime.date && !bookingContext.date) {
                 bookingContext.date = extractedDateTime.date;
-                console.log(`   📅 [PRE-EXTRACT] Fecha guardada en contexto: ${extractedDateTime.date}`);
+                contextUpdated = true;
+                console.log(`   ✅ [PRE-EXTRACT] Fecha guardada en contexto: ${extractedDateTime.date}`);
             }
             if (extractedDateTime.time && !bookingContext.time) {
                 bookingContext.time = extractedDateTime.time;
+                contextUpdated = true;
                 console.log(`   ⏰ [PRE-EXTRACT] Hora guardada en contexto: ${extractedDateTime.time}`);
             }
 
-            // Guardar contexto actualizado
-            bookingContextCache.set(cacheKey, bookingContext);
+            // Guardar contexto actualizado ANTES de llamar a GPT
+            if (contextUpdated) {
+                bookingContextCache.set(cacheKey, bookingContext);
+                console.log('\n📝 [CONTEXTO ACTUALIZADO] Guardado en cache:', JSON.stringify(bookingContext, null, 2));
+            }
 
             try {
                 const result = await processWithAI(
@@ -451,11 +468,11 @@ exports.handleWahaWebhook = async (req, res) => {
                     tenantName
                 );
 
-                // Actualizar contexto
+                // Actualizar contexto con lo que devuelva la IA
                 if (result.updatedContext) {
                     bookingContext = { ...bookingContext, ...result.updatedContext };
                     bookingContextCache.set(cacheKey, bookingContext);
-                    console.log(`   📝 [CONTEXTO]:`, JSON.stringify(bookingContext));
+                    console.log(`\n📝 [CONTEXTO POST-IA]:`, JSON.stringify(bookingContext, null, 2));
                 }
 
                 // Si se agendó, limpiar contexto
@@ -578,7 +595,7 @@ async function processWithAI(apiKey, tenantId, clientId, userMessage, conversati
     }
 
     // =====================================================
-    // 🔴 SYSTEM PROMPT v8 - CON CONTEXTO DE FECHA/HORA
+    // 🔴 SYSTEM PROMPT v9 - MEJORADO Y COMPLETO
     // =====================================================
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
@@ -586,59 +603,106 @@ Hoy: ${hoyStr}.${contextInfo}
 FUNCIÓN: "consultar_orquestador" - DEBES usarla para TODO sobre servicios y citas.
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #1: USA LOS DATOS DEL CONTEXTO
+🔴 REGLA CRÍTICA #1: NUNCA INVENTES INFORMACIÓN
 ═══════════════════════════════════════════════════════════════
-Si hay fecha/hora en "DATOS DE LA RESERVA EN PROGRESO", ÚSALOS al llamar al orquestador.
-NO preguntes la fecha si ya está en el contexto.
-NO preguntes la hora si ya está en el contexto.
-
-EJEMPLO:
-- Contexto: "📅 Fecha: 2026-01-21"
-- Usuario: "quiero un corte caballero"
-- Tú: [llamas orquestador con service="Corte Caballero", date="2026-01-21"]
+- NUNCA inventes servicios que no existen
+- NUNCA inventes estilistas que no existen
+- NUNCA inventes disponibilidad
+- SOLO usa información que el orquestador te devuelva
+- Si el orquestador dice "no_match_service" → el servicio NO existe
+- Si el orquestador dice "stylist_not_offering_service" → mostrar SOLO servicios que SÍ ofrece
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #2: SIEMPRE VERIFICA EL SERVICIO PRIMERO
+🔴 REGLA CRÍTICA #2: USA LOS DATOS DEL CONTEXTO
 ═══════════════════════════════════════════════════════════════
-Cuando el usuario mencione CUALQUIER servicio (corte, manicure, etc.):
-1. INMEDIATAMENTE llama al orquestador con el servicio + fecha/hora del contexto si existen
-2. Si hay múltiples opciones → muéstralas y espera que elija
-3. SOLO si no hay fecha en contexto → pregunta fecha
+Si hay datos en "DATOS DE LA RESERVA EN PROGRESO":
+- SIEMPRE úsalos al llamar al orquestador
+- NO preguntes fecha si ya está en contexto → usa la del contexto
+- NO preguntes hora si ya está en contexto → usa la del contexto
+- Si servicio está CONFIRMADO → usa ese servicio
+
+EJEMPLOS:
+1. Usuario: "quiero un corte para mañana"
+   Contexto: VACÍO
+   Acción: [llamar orquestador: service="corte", date="2026-01-21"]
+
+2. Usuario: "a las 3pm"
+   Contexto: {date: "2026-01-21", service: "Corte Caballero", service_confirmed: true}
+   Acción: [llamar orquestador: service="Corte Caballero", selected_service_id="{id}", date="2026-01-21", time="15:00"]
+
+3. Usuario: "quiero cambiar el servicio"
+   Acción: Resetear contexto de servicio, preguntar cuál servicio quiere
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #3: FLUJO OBLIGATORIO
+🔴 REGLA CRÍTICA #3: FLUJO OBLIGATORIO - EN ORDEN
 ═══════════════════════════════════════════════════════════════
 PASO 1: SERVICIO (obligatorio primero)
-- Siempre verificar/confirmar servicio antes de todo
-- Si hay múltiples opciones, el usuario DEBE elegir una
+- Usuario menciona servicio → llamar orquestador INMEDIATAMENTE con fecha/hora del contexto si existen
+- Si el orquestador devuelve múltiples opciones → mostrar y esperar selección
+- Si el orquestador devuelve "no_match_service" → "No encontré ese servicio. ¿Cuál necesitas?"
+- NUNCA sugerir servicios inventados
 
 PASO 2: FECHA (solo si no está en contexto)
-- Si ya hay fecha en contexto, NO preguntar
+- Si fecha YA está en contexto → NO preguntar, usar directamente
+- Si no está → preguntar "¿Para qué fecha?"
 
 PASO 3: HORA (solo si no está en contexto)
-- Si ya hay hora en contexto, NO preguntar
+- Si hora YA está en contexto → NO preguntar, usar directamente
+- Si no está → preguntar "¿A qué hora?"
 
-PASO 4: ESTILISTA (automático o elegir)
-- Mostrar estilistas disponibles
-- Usuario elige o se asigna el primero
+PASO 4: ESTILISTA
+- Mostrar SOLO estilistas que el orquestador devuelva
+- Si usuario dice "otro" / "quién más" / "hay otro" → action="listar_estilistas_disponibles"
+- NUNCA inventar estilistas
 
 PASO 5: CONFIRMAR Y AGENDAR
-- Mostrar resumen
-- Con confirmación → action="agendar"
+- Mostrar resumen completo
+- "sí"/"dale"/"confirmo"/"listo" → action="agendar"
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #4: CAMBIO DE ESTILISTA
+🔴 REGLA CRÍTICA #4: MANEJO DE RESPUESTAS DEL ORQUESTADOR
 ═══════════════════════════════════════════════════════════════
-Si el usuario dice: "otro estilista", "quién más", "hay otro", "cambiar estilista"
-→ Usa action="listar_estilistas_disponibles" SIN enviar stylist actual
+Cuando el orquestador responda, interpreta así:
+
+status="no_match_service":
+→ "No encontré ese servicio. ¿Cuál servicio necesitas?"
+
+status="disambiguation_needed" con servicios:
+→ Mostrar las opciones EXACTAS que devuelve
+→ "Tengo estos servicios disponibles: [lista]. ¿Cuál prefieres?"
+
+status="stylist_not_offering_service" con stylist_services:
+→ "[Estilista] no ofrece [servicio], pero sí ofrece: [lista de servicios reales]"
+→ "¿Quieres alguno de estos o prefieres otro estilista?"
+
+status="choose_stylist" con available_stylists:
+→ Mostrar SOLO los estilistas de la lista
+→ "Estos estilistas están disponibles: [lista]. ¿Con quién prefieres?"
+
+status="no_stylist_available_at_time":
+→ "No hay estilistas disponibles a esa hora. ¿Te sirve otra hora?"
+
+status="need_date":
+→ "¿Para qué fecha quieres agendar?"
+
+status="need_time" o status="choose_time":
+→ Si hay suggestions → mostrarlas
+→ "¿A qué hora te gustaría? Tengo disponible: [lista]"
+
+status="confirm":
+→ Mostrar resumen del summary
+→ "¿Confirmo esta cita: [servicio] con [estilista] el [fecha] a las [hora]?"
+
+status="booked":
+→ "¡Listo! Tu cita quedó agendada..."
 
 ═══════════════════════════════════════════════════════════════
-OTRAS REGLAS:
+REGLAS ADICIONALES:
 ═══════════════════════════════════════════════════════════════
 - Respuestas CORTAS (1-3 oraciones máximo)
-- "sí"/"dale"/"confirmo"/"listo" = confirmación → action="agendar"
-- NUNCA inventes servicios, estilistas o disponibilidad
-- SIEMPRE usa el orquestador para verificar datos`;
+- Tono amigable y natural
+- Si el usuario cancela → limpiar contexto
+- SIEMPRE validar con el orquestador antes de confirmar`;
 
     // =====================================================
     // FUNCTIONS
@@ -649,12 +713,19 @@ OTRAS REGLAS:
             function: {
                 name: "consultar_orquestador",
                 description: `Consulta servicios, verifica disponibilidad y agenda citas. 
-                
+
+USA ESTA FUNCIÓN PARA:
+- Verificar si un servicio existe
+- Obtener servicios de un estilista
+- Ver disponibilidad de estilistas
+- Listar horarios disponibles
+- Confirmar y agendar citas
+
 IMPORTANTE: 
 - Si el usuario menciona un servicio → llama con el servicio + fecha/hora del contexto si existen
 - Si hay múltiples servicios similares → el orquestador devolverá las opciones
 - Para cambiar estilista → usa action="listar_estilistas_disponibles" sin stylist
-- USA la fecha del contexto si está disponible (no preguntes de nuevo)`,
+- USA la fecha/hora del contexto si están disponibles (no preguntes de nuevo)`,
                 parameters: {
                     type: "object",
                     properties: {
@@ -665,7 +736,7 @@ IMPORTANTE:
                         },
                         service: {
                             type: "string",
-                            description: "Nombre del servicio."
+                            description: "Nombre del servicio (ej: 'corte', 'manicure')"
                         },
                         selected_service_id: {
                             type: "string",
@@ -699,6 +770,8 @@ IMPORTANTE:
         { role: 'user', content: userMessage }
     ];
 
+    console.log('\n🤖 [GPT] Enviando request a OpenAI...');
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -722,42 +795,51 @@ IMPORTANTE:
     const data = await response.json();
     const assistantMessage = data.choices[0].message;
 
+    console.log('🤖 [GPT] Respuesta recibida');
+
     // Si hay llamada a función
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
         const toolCall = assistantMessage.tool_calls[0];
         const functionArgs = JSON.parse(toolCall.function.arguments || '{}');
 
-        console.log(`   🔧 [FUNCIÓN] consultar_orquestador`);
-        console.log(`   📦 [ARGS RAW]:`, JSON.stringify(functionArgs));
+        console.log(`\n🔧 [FUNCIÓN] consultar_orquestador llamada`);
+        console.log(`📦 [ARGS RAW de GPT]:`, JSON.stringify(functionArgs, null, 2));
 
         // =====================================================
-        // LÓGICA DE MERGE INTELIGENTE (MEJORADA)
+        // LÓGICA DE MERGE INTELIGENTE (MEJORADA CON DEBUG)
         // =====================================================
         const isListingStylists = functionArgs.action === 'listar_estilistas_disponibles';
-
-        // Solo incluir datos del contexto si el servicio ya está confirmado
         const serviceConfirmed = bookingContext.service_confirmed === true;
+
+        console.log('\n🔧 [MERGE DEBUG] Estado antes del merge:');
+        console.log('   functionArgs:', JSON.stringify(functionArgs, null, 2));
+        console.log('   bookingContext:', JSON.stringify(bookingContext, null, 2));
+        console.log('   serviceConfirmed:', serviceConfirmed);
+        console.log('   isListingStylists:', isListingStylists);
 
         const mergedArgs = {
             action: functionArgs.action || 'orchestrate',
-            // Servicio: usar el nuevo si viene, o el del contexto si está confirmado
+
+            // Servicio: GPT puede pasar nuevo servicio o usar confirmado del contexto
             service: functionArgs.service || (serviceConfirmed ? bookingContext.service : ''),
             selected_service_id: functionArgs.selected_service_id || (serviceConfirmed ? bookingContext.service_id : ''),
-            // 🆕 Fecha y hora: SIEMPRE usar del contexto si existen (no solo si servicio confirmado)
-            date: functionArgs.date || bookingContext.date || '',
-            time: functionArgs.time || bookingContext.time || '',
+
+            // 🎯 FECHA Y HORA: PRIORIDAD ABSOLUTA AL CONTEXTO
+            // Si existe en contexto, usar eso (ignorar lo que GPT diga)
+            date: bookingContext.date || functionArgs.date || '',
+            time: bookingContext.time || functionArgs.time || '',
+
             // Estilista: no incluir si está listando
             stylist: isListingStylists ? '' : (functionArgs.stylist || bookingContext.stylist || ''),
             selected_stylist_id: isListingStylists ? '' : (functionArgs.selected_stylist_id || bookingContext.stylist_id || ''),
         };
 
-        console.log(`   📦 [MERGED]:`, JSON.stringify(mergedArgs));
-        console.log(`   🔍 [FLAGS] serviceConfirmed: ${serviceConfirmed}, isListingStylists: ${isListingStylists}`);
-        console.log(`   📅 [CONTEXT] date: ${bookingContext.date}, time: ${bookingContext.time}`);
+        console.log('\n✅ [MERGE RESULT] Args finales para orquestador:');
+        console.log(JSON.stringify(mergedArgs, null, 2));
 
         const orchestratorResult = await callOrchestrator(mergedArgs, tenantId, clientId);
 
-        console.log(`   📋 [ORQUESTADOR]:`, JSON.stringify(orchestratorResult).substring(0, 500));
+        console.log(`\n📋 [ORQUESTADOR RESPONSE]:`, JSON.stringify(orchestratorResult, null, 2).substring(0, 800));
 
         // =====================================================
         // EXTRAER Y ACTUALIZAR CONTEXTO
@@ -777,6 +859,7 @@ IMPORTANTE:
                 updatedContext.service = svc.name;
                 updatedContext.service_id = svc.id;
                 updatedContext.service_confirmed = true;
+                console.log(`   ✅ Servicio confirmado: ${svc.name}`);
             }
         }
 
@@ -785,20 +868,31 @@ IMPORTANTE:
             if (orchestratorResult.summary.stylist && !isListingStylists) {
                 updatedContext.stylist = orchestratorResult.summary.stylist.name;
                 updatedContext.stylist_id = orchestratorResult.summary.stylist.id;
+                console.log(`   ✅ Estilista confirmado: ${updatedContext.stylist}`);
             }
-            if (orchestratorResult.summary.date) updatedContext.date = orchestratorResult.summary.date;
-            if (orchestratorResult.summary.time) updatedContext.time = orchestratorResult.summary.time;
+            if (orchestratorResult.summary.date) {
+                updatedContext.date = orchestratorResult.summary.date;
+                console.log(`   ✅ Fecha confirmada: ${updatedContext.date}`);
+            }
+            if (orchestratorResult.summary.time) {
+                updatedContext.time = orchestratorResult.summary.time;
+                console.log(`   ✅ Hora confirmada: ${updatedContext.time}`);
+            }
         }
 
         // Si devolvió lista de estilistas, limpiar estilista del contexto
         if (orchestratorResult.status === 'choose_stylist') {
             updatedContext.stylist = null;
             updatedContext.stylist_id = null;
+            console.log(`   🔄 Limpiando estilista del contexto (choose_stylist)`);
         }
 
         if (orchestratorResult.status === 'booked') {
             updatedContext.booked = true;
+            console.log(`   🎉 Cita agendada exitosamente`);
         }
+
+        console.log('\n📝 [UPDATED CONTEXT]:', JSON.stringify(updatedContext, null, 2));
 
         // Segunda llamada a GPT para generar respuesta
         const followUpMessages = [
@@ -806,6 +900,8 @@ IMPORTANTE:
             assistantMessage,
             { role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(orchestratorResult) }
         ];
+
+        console.log('\n🤖 [GPT] Generando respuesta final...');
 
         const finalResponse = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
@@ -829,12 +925,18 @@ IMPORTANTE:
         }
 
         const finalData = await finalResponse.json();
+        const finalResponseText = finalData.choices[0].message.content;
+
+        console.log('✅ [GPT] Respuesta final generada');
+
         return {
-            response: finalData.choices[0].message.content,
+            response: finalResponseText,
             updatedContext
         };
     }
 
+    // Si no hubo llamada a función, respuesta directa de GPT
+    console.log('💬 [GPT] Respuesta directa (sin función)');
     return { response: assistantMessage.content, updatedContext: null };
 }
 
@@ -849,13 +951,17 @@ async function callOrchestrator(args, tenantId, clientId) {
 
         const isListingStylists = args.action === 'listar_estilistas_disponibles';
 
-        console.log(`   🔧 [ORQUESTADOR] Action: ${args.action}, ListingStylists: ${isListingStylists}`);
+        console.log(`\n🎯 [ORQUESTADOR CALL] Iniciando...`);
+        console.log(`   Action: ${args.action}`);
+        console.log(`   ListingStylists: ${isListingStylists}`);
 
         // =====================================================
         // MANEJO ESPECIAL: LISTAR ESTILISTAS
         // =====================================================
         if (isListingStylists && args.service && args.date && args.time) {
             try {
+                console.log(`   📋 Listando estilistas para: ${args.service} | ${args.date} ${args.time}`);
+
                 const allStylists = await findAvailableStylists(
                     tenantId,
                     args.service,
@@ -869,6 +975,8 @@ async function callOrchestrator(args, tenantId, clientId) {
                         id: s.id,
                         name: `${s.first_name} ${s.last_name || ''}`.trim()
                     }));
+
+                console.log(`   ✅ Estilistas disponibles encontrados: ${availableList.length}`);
 
                 if (availableList.length === 0) {
                     return {
@@ -897,6 +1005,8 @@ async function callOrchestrator(args, tenantId, clientId) {
         // =====================================================
         // FLUJO NORMAL DEL ORQUESTADOR
         // =====================================================
+        console.log(`   🔄 Llamando a aiOrchestratorPublic...`);
+
         const mockReq = {
             body: {
                 tenantId: tenantId,
@@ -929,7 +1039,7 @@ async function callOrchestrator(args, tenantId, clientId) {
 
         await appointmentController.aiOrchestratorPublic(mockReq, mockRes);
 
-        console.log(`   🎯 [ORQUESTADOR] Status HTTP: ${responseStatus}`);
+        console.log(`   🎯 Orquestador respondió con status HTTP: ${responseStatus}`);
 
         if (responseData) {
             if (responseData.status === 'booked' && responseData.appointment) {
@@ -939,9 +1049,9 @@ async function callOrchestrator(args, tenantId, clientId) {
                         ...responseData.appointment,
                         createdVia: 'whatsapp'
                     });
-                    console.log(`   📡 [SOCKET] appointment:created emitido`);
+                    console.log(`   📡 Socket emitido: appointment:created`);
                 } catch (socketError) {
-                    console.log(`   ⚠️ [SOCKET] Error:`, socketError.message);
+                    console.log(`   ⚠️ Socket error:`, socketError.message);
                 }
             }
             return responseData;
@@ -950,7 +1060,7 @@ async function callOrchestrator(args, tenantId, clientId) {
         return { success: false, message: 'Error procesando solicitud' };
 
     } catch (error) {
-        console.error('❌ Error orquestador:', error);
+        console.error('❌ Error en callOrchestrator:', error);
         return { success: false, message: 'Error: ' + error.message };
     }
 }
