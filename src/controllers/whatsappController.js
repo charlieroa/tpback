@@ -288,10 +288,39 @@ exports.handleWahaWebhook = async (req, res) => {
             const extractedDateTime = extractDateTimeFromMessage(userMessage);
 
             let contextUpdated = false;
+            let shouldAutoCheck = false; // 🆕 Flag para verificar automáticamente
+
+            // 🆕 DETECTAR NOMBRES DE ESTILISTAS MENCIONADOS (si hay servicio en contexto)
+            if (bookingContext.service_id && !bookingContext.stylist_id) {
+                // Patrones comunes de nombres de estilistas mencionados
+                const stylistNames = ['pedro', 'carlos', 'sofia', 'sofía', 'maria', 'maría', 'juan', 'ana', 'laura'];
+                const userMessageLower = userMessage.toLowerCase().trim();
+                
+                for (const name of stylistNames) {
+                    if (userMessageLower === name || 
+                        userMessageLower.includes(name + ' ') || 
+                        userMessageLower.includes(' ' + name) ||
+                        userMessageLower === name + ' está bien' ||
+                        userMessageLower.includes(name + ' esta bien')) {
+                        
+                        bookingContext.stylist = name.charAt(0).toUpperCase() + name.slice(1);
+                        contextUpdated = true;
+                        console.log(`   ✅ Estilista detectado y guardado: ${bookingContext.stylist}`);
+                        break;
+                    }
+                }
+            }
+
             if (extractedDateTime.date && !bookingContext.date) {
                 bookingContext.date = extractedDateTime.date;
                 contextUpdated = true;
                 console.log(`   ✅ Fecha guardada en contexto: ${extractedDateTime.date}`);
+                
+                // 🆕 Si ya tenemos servicio + estilista, podemos verificar automáticamente
+                if (bookingContext.service_id && bookingContext.stylist) {
+                    shouldAutoCheck = true;
+                    console.log(`   🎯 Tiene servicio + estilista + fecha → Puede verificar automáticamente`);
+                }
             }
             if (extractedDateTime.time && !bookingContext.time) {
                 bookingContext.time = extractedDateTime.time;
@@ -303,12 +332,24 @@ exports.handleWahaWebhook = async (req, res) => {
                 bookingContextCache.set(cacheKey, bookingContext);
             }
 
+            // 🆕 Si se acaba de completar la información necesaria, incluir hint para GPT
+            if (shouldAutoCheck) {
+                console.log(`   💡 Hint para GPT: Ya tiene servicio + estilista + fecha → Debe verificar disponibilidad`);
+            }
+
             try {
+                // 🆕 Si acabamos de completar la información, añadir hint al mensaje
+                let messageToProcess = userMessage;
+                if (shouldAutoCheck) {
+                    messageToProcess = `${userMessage}\n\n[NOTA: Ya tienes servicio + estilista + fecha en el contexto. Verifica disponibilidad automáticamente.]`;
+                    console.log(`   📝 Mensaje procesado con hint de auto-verificación`);
+                }
+
                 const result = await processWithAI(
                     apiKey,
                     tenantId,
                     clientId,
-                    userMessage,
+                    messageToProcess,
                     conversationHistory,
                     bookingContext,
                     senderName,
@@ -452,9 +493,17 @@ PASO 1: BUSCAR SERVICIO PRIMERO - ⚠️ OBLIGATORIO
 
 PASO 2: ELEGIR ESTILISTA
 - Usuario elige estilista por nombre (ej: "sofia", "pedro", "carlos")
-- SI HAY FECHA EN CONTEXTO → verificar_disponibilidad INMEDIATAMENTE con todos los datos
+- SI HAY FECHA EN CONTEXTO → verificar_disponibilidad INMEDIATAMENTE sin preguntar nada
   → Ejemplo: [verificar_disponibilidad: serviceId="xxx", stylistName="sofia", date="2026-01-22"]
+  → Mostrar directamente los horarios: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00..."
 - SI NO HAY FECHA → preguntar: "¿Para qué fecha quieres tu cita con [nombre]?"
+
+PASO 2.5: USUARIO MENCIONA HORA
+- Si el usuario dice una hora (ej: "a las 9", "9", "mañana a las 9") y ya hay estilista + fecha en contexto:
+  → Llamar verificar_disponibilidad con la hora incluida
+  → Responder DIRECTAMENTE:
+    * Si disponible: "Sí, Sofía está disponible mañana a las 9:00. ¿Confirmo tu cita?"
+    * Si NO disponible: "Sofía no está disponible mañana a las 9:00. Horarios disponibles: 10:00, 11:00, 14:00. ¿Cuál prefieres?"
 
 PASO 3: VERIFICAR DISPONIBILIDAD
 - Usar fecha del contexto si existe
@@ -478,19 +527,27 @@ Usuario: "quiero un servicio para mañana"
 → [buscar_servicio: service="servicio"] OBLIGATORIO
 → Mostrar todos los servicios disponibles
 
-EJEMPLO 2 - Fecha ya mencionada, usuario pide servicio específico:
-Contexto: 📅 Fecha: 2026-01-21 (mañana)
-Usuario: "corte"
-→ [buscar_servicio: "corte"] OBLIGATORIO
-→ Mostrar opciones: "Corte Caballero", "Barba más corte"
-Usuario: "corte caballero"
-→ [buscar_servicio: "corte caballero"] otra vez si hay múltiples
-→ Mostrar estilistas: Pedro, Carlos, Sofía
+EJEMPLO 2 - Fecha ya mencionada, usuario elige estilista:
+Contexto: 📅 Fecha: 2026-01-21 (mañana), 📋 Servicio: Corte Caballero
 Usuario: "sofia"
-→ YA HAY FECHA en contexto (2026-01-21)
-→ [verificar_disponibilidad: serviceId, stylistName="Sofia", date="2026-01-21"]
-→ RESPUESTA DIRECTA: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00, 14:00. ¿Cuál prefieres?"
-→ NO digas: "Voy a verificar" o "Un momento, por favor"
+→ YA HAY FECHA en contexto → LLAMAR verificar_disponibilidad AUTOMÁTICAMENTE
+→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21"]
+→ RESPUESTA DIRECTA: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00, 14:00, 15:00. ¿Cuál prefieres?"
+→ NO digas: "¿Para qué fecha?" (ya la tiene), NO digas "Voy a verificar"
+
+EJEMPLO 3 - Usuario menciona fecha después de elegir estilista:
+Contexto: 📋 Servicio: Corte Caballero, 💇 Estilista: Sofía (sin fecha)
+Usuario: "para mañana"
+→ Se guarda fecha: 📅 2026-01-21
+→ AUTOMÁTICAMENTE: [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21"]
+→ "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00, 14:00. ¿Cuál prefieres?"
+
+EJEMPLO 4 - Usuario menciona hora:
+Contexto: 📅 Fecha: 2026-01-21, 📋 Servicio: Corte Caballero, 💇 Estilista: Sofía
+Usuario: "a las 9" o "9" o "tipo 9"
+→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="09:00"]
+→ Si disponible: "Sí, Sofía está disponible mañana a las 9:00. ¿Confirmo tu cita?"
+→ Si NO disponible: "Sofía no está disponible mañana a las 9:00. Horarios disponibles: 10:00, 11:00, 14:00. ¿Cuál prefieres?"
 
 EJEMPLO 3 - Sin fecha previa:
 Contexto: 📋 Servicio: Corte Caballero (sin fecha)
@@ -504,7 +561,11 @@ Usuario: "corte caballero con sofia mañana"
 → Guardar servicio, extraer fecha="mañana", estilista="sofia"
 → [verificar_disponibilidad con todos los datos]
 
-REGLA DE ORO: Si el usuario pide un servicio (aunque sea genérico), LLAMA buscar_servicio INMEDIATAMENTE. No respondas sin llamar la función.`;
+REGLA DE ORO: 
+- Si el usuario pide un servicio → LLAMA buscar_servicio INMEDIATAMENTE
+- Si tienes servicio + estilista + fecha en contexto → LLAMA verificar_disponibilidad AUTOMÁTICAMENTE
+- Si el usuario menciona una hora después de elegir estilista → LLAMA verificar_disponibilidad con la hora
+- SIEMPRE di el resultado directamente, NO digas "Voy a verificar" ni "Un momento"`;
 
     // Funciones
     const FUNCTIONS = [
