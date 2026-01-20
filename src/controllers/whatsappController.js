@@ -4,8 +4,9 @@ const db = require('../config/db');
 const wahaService = require('../services/wahaService');
 const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
+const { normalizeDateKeyword, normalizeHumanTimeToHHMM, isDateKeyword } = require('../utils/appointmentHelpers');
 
-console.log('🚀 [DEBUG] whatsappController.js cargado v7 (Flujo Corregido: Servicio → Fecha → Estilista)');
+console.log('🚀 [DEBUG] whatsappController.js cargado v8 (Extracción de fecha/hora del mensaje)');
 
 const TIME_ZONE = 'America/Bogota';
 
@@ -14,6 +15,82 @@ const conversationCache = new Map();
 
 // Cache para datos de reserva en progreso
 const bookingContextCache = new Map();
+
+/* =================================================================== */
+/* ==============   EXTRACCIÓN DE FECHA/HORA DEL MENSAJE   =========== */
+/* =================================================================== */
+
+/**
+ * 🎯 Extrae fecha y hora de un mensaje del usuario
+ * Ejemplos:
+ * - "quiero un corte para mañana" → { date: "2026-01-21" }
+ * - "cita para el viernes a las 3pm" → { date: "2026-01-24", time: "15:00" }
+ * - "mañana a las 10" → { date: "2026-01-21", time: "10:00" }
+ */
+function extractDateTimeFromMessage(message) {
+    const result = { date: null, time: null };
+    const lower = message.toLowerCase();
+
+    console.log(`🔍 [EXTRACT] Analizando mensaje: "${message}"`);
+
+    // ===== PATRONES DE FECHA =====
+    const datePatterns = [
+        // "para mañana", "mañana", "para pasado mañana"
+        { regex: /(?:para\s+)?(pasado\s*mañana|pasado\s*manana)/i, keyword: 'pasado mañana' },
+        { regex: /(?:para\s+)?(mañana|manana)/i, keyword: 'mañana' },
+        { regex: /(?:para\s+)?(hoy)/i, keyword: 'hoy' },
+        // "para el lunes", "el viernes", "este sábado"
+        { regex: /(?:para\s+)?(?:el\s+|este\s+)?(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)/i, extract: true },
+        // "para el 15", "el 20 de enero"
+        { regex: /(?:para\s+)?(?:el\s+)?(\d{1,2})(?:\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre))?/i, extract: true },
+    ];
+
+    for (const pattern of datePatterns) {
+        const match = lower.match(pattern.regex);
+        if (match) {
+            let dateInput = pattern.keyword || match[0];
+            // Limpiar "para " del inicio
+            dateInput = dateInput.replace(/^para\s+/i, '').trim();
+
+            const normalized = normalizeDateKeyword(dateInput);
+            if (normalized) {
+                result.date = normalized;
+                console.log(`   ✅ [EXTRACT] Fecha detectada: "${dateInput}" → ${normalized}`);
+                break;
+            }
+        }
+    }
+
+    // ===== PATRONES DE HORA =====
+    const timePatterns = [
+        // "a las 3pm", "a las 10:30", "a las 9 de la mañana"
+        /a\s+las\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|de\s+la\s+mañana|de\s+la\s+tarde|de\s+la\s+noche)?/i,
+        // "3pm", "10am", "5 pm"
+        /\b(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)\b/i,
+        // "tipo 3", "como a las 10"
+        /(?:tipo|como\s+a\s+las)\s+(\d{1,2})/i,
+    ];
+
+    for (const pattern of timePatterns) {
+        const match = lower.match(pattern);
+        if (match) {
+            // Extraer la parte de la hora del match
+            const timeStr = match[0];
+            const normalized = normalizeHumanTimeToHHMM(timeStr);
+            if (normalized && normalized !== '') {
+                result.time = normalized;
+                console.log(`   ✅ [EXTRACT] Hora detectada: "${timeStr}" → ${normalized}`);
+                break;
+            }
+        }
+    }
+
+    if (!result.date && !result.time) {
+        console.log(`   ℹ️ [EXTRACT] No se detectó fecha/hora en el mensaje`);
+    }
+
+    return result;
+}
 
 /* =================================================================== */
 /* ==============   1. GET STATUS / QR IMAGE (GET)   ================= */
@@ -345,6 +422,23 @@ exports.handleWahaWebhook = async (req, res) => {
                 bookingContextCache.set(cacheKey, bookingContext);
             }
 
+            // ==========================================
+            // 🆕 EXTRAER FECHA/HORA DEL MENSAJE DEL USUARIO
+            // ==========================================
+            const extractedDateTime = extractDateTimeFromMessage(userMessage);
+
+            if (extractedDateTime.date && !bookingContext.date) {
+                bookingContext.date = extractedDateTime.date;
+                console.log(`   📅 [PRE-EXTRACT] Fecha guardada en contexto: ${extractedDateTime.date}`);
+            }
+            if (extractedDateTime.time && !bookingContext.time) {
+                bookingContext.time = extractedDateTime.time;
+                console.log(`   ⏰ [PRE-EXTRACT] Hora guardada en contexto: ${extractedDateTime.time}`);
+            }
+
+            // Guardar contexto actualizado
+            bookingContextCache.set(cacheKey, bookingContext);
+
             try {
                 const result = await processWithAI(
                     apiKey,
@@ -475,16 +569,16 @@ async function processWithAI(apiKey, tenantId, clientId, userMessage, conversati
     if (Object.keys(bookingContext).length > 0) {
         const parts = [];
         if (bookingContext.service_confirmed) parts.push(`✅ Servicio CONFIRMADO: ${bookingContext.service}`);
-        if (bookingContext.date) parts.push(`- Fecha: ${bookingContext.date}`);
-        if (bookingContext.time) parts.push(`- Hora: ${bookingContext.time}`);
-        if (bookingContext.stylist) parts.push(`- Estilista: ${bookingContext.stylist}`);
+        if (bookingContext.date) parts.push(`📅 Fecha: ${bookingContext.date}`);
+        if (bookingContext.time) parts.push(`⏰ Hora: ${bookingContext.time}`);
+        if (bookingContext.stylist) parts.push(`💇 Estilista: ${bookingContext.stylist}`);
         if (parts.length > 0) {
             contextInfo = `\n\n📋 DATOS DE LA RESERVA EN PROGRESO:\n${parts.join('\n')}`;
         }
     }
 
     // =====================================================
-    // 🔴 SYSTEM PROMPT v7 - FLUJO ESTRICTO
+    // 🔴 SYSTEM PROMPT v8 - CON CONTEXTO DE FECHA/HORA
     // =====================================================
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
@@ -492,40 +586,37 @@ Hoy: ${hoyStr}.${contextInfo}
 FUNCIÓN: "consultar_orquestador" - DEBES usarla para TODO sobre servicios y citas.
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #1: SIEMPRE VERIFICA EL SERVICIO PRIMERO
+🔴 REGLA CRÍTICA #1: USA LOS DATOS DEL CONTEXTO
+═══════════════════════════════════════════════════════════════
+Si hay fecha/hora en "DATOS DE LA RESERVA EN PROGRESO", ÚSALOS al llamar al orquestador.
+NO preguntes la fecha si ya está en el contexto.
+NO preguntes la hora si ya está en el contexto.
+
+EJEMPLO:
+- Contexto: "📅 Fecha: 2026-01-21"
+- Usuario: "quiero un corte caballero"
+- Tú: [llamas orquestador con service="Corte Caballero", date="2026-01-21"]
+
+═══════════════════════════════════════════════════════════════
+🔴 REGLA CRÍTICA #2: SIEMPRE VERIFICA EL SERVICIO PRIMERO
 ═══════════════════════════════════════════════════════════════
 Cuando el usuario mencione CUALQUIER servicio (corte, manicure, etc.):
-1. INMEDIATAMENTE llama al orquestador con solo el servicio
-2. NO preguntes fecha/hora hasta que el servicio esté 100% confirmado
-3. Si hay múltiples opciones → muéstralas y espera que elija
-4. SOLO cuando el servicio sea único/confirmado → pregunta fecha
-
-EJEMPLO CORRECTO:
-- Usuario: "quiero un corte"
-- Tú: [llamas orquestador con service="corte"]
-- Orquestador: disambiguation_needed (Corte Caballero, Barba más corte)
-- Tú: "Tenemos Corte Caballero y Barba más corte. ¿Cuál prefieres?"
-- Usuario: "Corte caballero"
-- Tú: [llamas orquestador con service="Corte Caballero"]
-- Orquestador: need_date
-- Tú: "¿Para qué fecha quieres el Corte Caballero?"
-
-EJEMPLO INCORRECTO (NO HACER):
-- Usuario: "quiero un corte"
-- Tú: "Perfecto, ¿para qué fecha?" ❌ (NO preguntar fecha sin confirmar servicio)
+1. INMEDIATAMENTE llama al orquestador con el servicio + fecha/hora del contexto si existen
+2. Si hay múltiples opciones → muéstralas y espera que elija
+3. SOLO si no hay fecha en contexto → pregunta fecha
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #2: FLUJO OBLIGATORIO
+🔴 REGLA CRÍTICA #3: FLUJO OBLIGATORIO
 ═══════════════════════════════════════════════════════════════
 PASO 1: SERVICIO (obligatorio primero)
 - Siempre verificar/confirmar servicio antes de todo
 - Si hay múltiples opciones, el usuario DEBE elegir una
 
-PASO 2: FECHA (solo después de servicio confirmado)
-- Preguntar fecha solo cuando el servicio esté claro
+PASO 2: FECHA (solo si no está en contexto)
+- Si ya hay fecha en contexto, NO preguntar
 
-PASO 3: HORA (solo después de fecha)
-- Preguntar hora o usar la que el usuario dio
+PASO 3: HORA (solo si no está en contexto)
+- Si ya hay hora en contexto, NO preguntar
 
 PASO 4: ESTILISTA (automático o elegir)
 - Mostrar estilistas disponibles
@@ -536,7 +627,7 @@ PASO 5: CONFIRMAR Y AGENDAR
 - Con confirmación → action="agendar"
 
 ═══════════════════════════════════════════════════════════════
-🔴 REGLA CRÍTICA #3: CAMBIO DE ESTILISTA
+🔴 REGLA CRÍTICA #4: CAMBIO DE ESTILISTA
 ═══════════════════════════════════════════════════════════════
 Si el usuario dice: "otro estilista", "quién más", "hay otro", "cambiar estilista"
 → Usa action="listar_estilistas_disponibles" SIN enviar stylist actual
@@ -560,10 +651,10 @@ OTRAS REGLAS:
                 description: `Consulta servicios, verifica disponibilidad y agenda citas. 
                 
 IMPORTANTE: 
-- Si el usuario menciona un servicio → llama con SOLO el servicio primero
+- Si el usuario menciona un servicio → llama con el servicio + fecha/hora del contexto si existen
 - Si hay múltiples servicios similares → el orquestador devolverá las opciones
-- NO envíes fecha/hora hasta que el servicio esté confirmado
-- Para cambiar estilista → usa action="listar_estilistas_disponibles" sin stylist`,
+- Para cambiar estilista → usa action="listar_estilistas_disponibles" sin stylist
+- USA la fecha del contexto si está disponible (no preguntes de nuevo)`,
                 parameters: {
                     type: "object",
                     properties: {
@@ -574,7 +665,7 @@ IMPORTANTE:
                         },
                         service: {
                             type: "string",
-                            description: "Nombre del servicio. Enviar PRIMERO y SOLO para verificar antes de pedir fecha."
+                            description: "Nombre del servicio."
                         },
                         selected_service_id: {
                             type: "string",
@@ -590,11 +681,11 @@ IMPORTANTE:
                         },
                         date: {
                             type: "string",
-                            description: "Fecha: hoy/mañana/YYYY-MM-DD. SOLO enviar después de confirmar servicio."
+                            description: "Fecha: YYYY-MM-DD. USA LA FECHA DEL CONTEXTO SI EXISTE."
                         },
                         time: {
                             type: "string",
-                            description: "Hora: 5pm/17:00/9am. SOLO enviar después de confirmar servicio."
+                            description: "Hora: HH:mm. USA LA HORA DEL CONTEXTO SI EXISTE."
                         }
                     }
                 }
@@ -619,7 +710,7 @@ IMPORTANTE:
             messages,
             tools: FUNCTIONS,
             tool_choice: 'auto',
-            temperature: 0.3,  // Más bajo para seguir mejor las instrucciones
+            temperature: 0.3,
             max_tokens: 350
         })
     });
@@ -640,7 +731,7 @@ IMPORTANTE:
         console.log(`   📦 [ARGS RAW]:`, JSON.stringify(functionArgs));
 
         // =====================================================
-        // LÓGICA DE MERGE INTELIGENTE
+        // LÓGICA DE MERGE INTELIGENTE (MEJORADA)
         // =====================================================
         const isListingStylists = functionArgs.action === 'listar_estilistas_disponibles';
 
@@ -652,9 +743,9 @@ IMPORTANTE:
             // Servicio: usar el nuevo si viene, o el del contexto si está confirmado
             service: functionArgs.service || (serviceConfirmed ? bookingContext.service : ''),
             selected_service_id: functionArgs.selected_service_id || (serviceConfirmed ? bookingContext.service_id : ''),
-            // Fecha y hora: solo si el servicio está confirmado
-            date: serviceConfirmed ? (functionArgs.date || bookingContext.date || '') : (functionArgs.date || ''),
-            time: serviceConfirmed ? (functionArgs.time || bookingContext.time || '') : (functionArgs.time || ''),
+            // 🆕 Fecha y hora: SIEMPRE usar del contexto si existen (no solo si servicio confirmado)
+            date: functionArgs.date || bookingContext.date || '',
+            time: functionArgs.time || bookingContext.time || '',
             // Estilista: no incluir si está listando
             stylist: isListingStylists ? '' : (functionArgs.stylist || bookingContext.stylist || ''),
             selected_stylist_id: isListingStylists ? '' : (functionArgs.selected_stylist_id || bookingContext.stylist_id || ''),
@@ -662,6 +753,7 @@ IMPORTANTE:
 
         console.log(`   📦 [MERGED]:`, JSON.stringify(mergedArgs));
         console.log(`   🔍 [FLAGS] serviceConfirmed: ${serviceConfirmed}, isListingStylists: ${isListingStylists}`);
+        console.log(`   📅 [CONTEXT] date: ${bookingContext.date}, time: ${bookingContext.time}`);
 
         const orchestratorResult = await callOrchestrator(mergedArgs, tenantId, clientId);
 
@@ -684,7 +776,7 @@ IMPORTANTE:
                 const svc = orchestratorResult.summary?.service || orchestratorResult.service;
                 updatedContext.service = svc.name;
                 updatedContext.service_id = svc.id;
-                updatedContext.service_confirmed = true;  // Flag importante
+                updatedContext.service_confirmed = true;
             }
         }
 
