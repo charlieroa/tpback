@@ -10,21 +10,15 @@ const {
     clean,
     makeLocalUtc,
     toLocalHHmm,
-
-    getDayRangesFromWorkingHours,
-    getEffectiveStylistDayRanges,
-    intersectRangesArrays,
-    buildSlotsFromRanges,
 } = require('../utils/appointmentHelpers');
 
 const {
-    getServiceDurationMinutes,
     getStylistEffectiveDuration,
     getAvailableSlotsForStylist,
     createAppointmentRecord,
 } = require('../services/appointmentService');
 
-console.log('🤖 [WHATSAPP BOOKING] Controlador simplificado cargado v2.0');
+console.log('🤖 [WHATSAPP BOOKING] Controlador v3.0 - MANEJA FECHA FALTANTE');
 
 /* =================================================================== */
 /* ==================  PASO 1: BUSCAR SERVICIO  ====================== */
@@ -48,17 +42,17 @@ exports.searchService = async (req, res) => {
 
         const result = await db.query(
             `SELECT id, name, duration_minutes
-       FROM services
-       WHERE tenant_id = $1
-         AND LOWER(name) LIKE $2
-       ORDER BY 
-         CASE 
-           WHEN LOWER(name) = $3 THEN 1
-           WHEN LOWER(name) LIKE $3 || '%' THEN 2
-           ELSE 3
-         END,
-         name ASC
-       LIMIT 5`,
+             FROM services
+             WHERE tenant_id = $1
+               AND LOWER(name) LIKE $2
+             ORDER BY 
+               CASE 
+                 WHEN LOWER(name) = $3 THEN 1
+                 WHEN LOWER(name) LIKE $3 || '%' THEN 2
+                 ELSE 3
+               END,
+               name ASC
+             LIMIT 5`,
             [tenantId, `%${serviceName}%`, serviceName]
         );
 
@@ -147,6 +141,14 @@ exports.checkAvailability = async (req, res) => {
     try {
         const { tenantId, serviceId, stylistId, stylistName, date, time } = req.body;
 
+        console.log(`\n📅 [CHECK AVAILABILITY]`);
+        console.log(`   Tenant: ${tenantId}`);
+        console.log(`   ServiceId: ${serviceId}`);
+        console.log(`   StylistId: ${stylistId || 'N/A'}`);
+        console.log(`   StylistName: ${stylistName || 'N/A'}`);
+        console.log(`   Date: ${date || 'N/A'}`);
+        console.log(`   Time: ${time || 'N/A'}`);
+
         if (!tenantId || !UUID_RE.test(tenantId)) {
             return res.status(400).json({ error: 'tenantId inválido' });
         }
@@ -155,11 +157,51 @@ exports.checkAvailability = async (req, res) => {
             return res.status(400).json({ error: 'serviceId inválido' });
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // 🆕 MANEJO ESPECIAL: SI NO HAY FECHA, PEDIR FECHA (NO ES ERROR)
+        // ═══════════════════════════════════════════════════════════════
         if (!date) {
-            return res.status(400).json({ error: 'date requerido (YYYY-MM-DD)' });
-        }
+            console.log(`   ⚠️ Falta fecha - pidiendo al usuario`);
 
-        console.log(`\n📅 [CHECK AVAILABILITY] Servicio: ${serviceId.substring(0, 8)}... | Fecha: ${date} | Hora: ${time || 'cualquiera'}`);
+            // Primero, resolver el estilista si viene por nombre
+            let stylistInfo = null;
+            if (stylistName) {
+                const stylistResult = await db.query(
+                    `SELECT u.id, u.first_name, u.last_name
+                     FROM users u
+                     INNER JOIN stylist_services ss ON u.id = ss.user_id
+                     WHERE u.tenant_id = $1
+                       AND u.role_id = 3
+                       AND ss.service_id = $2
+                       AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'
+                       AND (
+                         LOWER(u.first_name) LIKE $3
+                         OR LOWER(u.last_name) LIKE $3
+                         OR LOWER(CONCAT(u.first_name, ' ', u.last_name)) LIKE $3
+                       )
+                     LIMIT 1`,
+                    [tenantId, serviceId, `%${clean(stylistName).toLowerCase()}%`]
+                );
+
+                if (stylistResult.rows.length > 0) {
+                    const row = stylistResult.rows[0];
+                    stylistInfo = {
+                        id: row.id,
+                        name: `${row.first_name} ${row.last_name || ''}`.trim()
+                    };
+                    console.log(`   ✅ Estilista encontrado: ${stylistInfo.name}`);
+                }
+            }
+
+            return res.status(200).json({
+                available: false,
+                needsDate: true,
+                stylist: stylistInfo,
+                message: stylistInfo
+                    ? `¡Perfecto! ¿Para qué fecha quieres tu cita con ${stylistInfo.name}?`
+                    : '¿Para qué fecha te gustaría agendar tu cita?'
+            });
+        }
 
         // Obtener info del servicio
         const serviceResult = await db.query(
@@ -174,14 +216,17 @@ exports.checkAvailability = async (req, res) => {
         const service = serviceResult.rows[0];
         const serviceName = service.name;
 
+        // ═══════════════════════════════════════════════════════════════
         // 🆕 RESOLVER ESTILISTA: Por ID o por Nombre
+        // ═══════════════════════════════════════════════════════════════
         let finalStylistId = stylistId;
+        let stylistInfo = null;
 
         if (!finalStylistId && stylistName) {
             console.log(`   🔍 Buscando estilista por nombre: "${stylistName}"`);
 
             const stylistResult = await db.query(
-                `SELECT u.id, u.first_name, u.last_name
+                `SELECT u.id, u.first_name, u.last_name, u.working_hours
                  FROM users u
                  INNER JOIN stylist_services ss ON u.id = ss.user_id
                  WHERE u.tenant_id = $1
@@ -198,14 +243,19 @@ exports.checkAvailability = async (req, res) => {
             );
 
             if (stylistResult.rows.length === 0) {
-                return res.status(404).json({
+                return res.status(200).json({
                     available: false,
-                    error: `No encontré un estilista llamado "${stylistName}" que ofrezca este servicio.`
+                    error: `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
+                    message: `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`
                 });
             }
 
             finalStylistId = stylistResult.rows[0].id;
-            console.log(`   ✅ Estilista encontrado: ${finalStylistId} (${stylistResult.rows[0].first_name} ${stylistResult.rows[0].last_name})`);
+            stylistInfo = {
+                id: finalStylistId,
+                name: `${stylistResult.rows[0].first_name} ${stylistResult.rows[0].last_name || ''}`.trim()
+            };
+            console.log(`   ✅ Estilista encontrado: ${stylistInfo.name} (${finalStylistId})`);
         }
 
         // CASO A: Con estilista específico
@@ -228,7 +278,7 @@ exports.checkAvailability = async (req, res) => {
                 return res.status(400).json({ error: 'El estilista no está activo' });
             }
 
-            const stylistName = `${stylist.first_name} ${stylist.last_name || ''}`.trim();
+            const stylistNameFull = `${stylist.first_name} ${stylist.last_name || ''}`.trim();
 
             const offersService = await db.query(
                 'SELECT 1 FROM stylist_services WHERE user_id = $1 AND service_id = $2',
@@ -239,7 +289,7 @@ exports.checkAvailability = async (req, res) => {
                 console.log(`   ❌ Estilista no ofrece este servicio`);
                 return res.status(200).json({
                     available: false,
-                    message: `${stylistName} no ofrece el servicio "${serviceName}".`
+                    message: `${stylistNameFull} no ofrece el servicio "${serviceName}".`
                 });
             }
 
@@ -253,10 +303,10 @@ exports.checkAvailability = async (req, res) => {
                 const isPastDay = slots.length > 0 && filteredSlots.length === 0;
                 return res.status(200).json({
                     available: false,
-                    stylist: { id: finalStylistId, name: stylistName },
+                    stylist: { id: finalStylistId, name: stylistNameFull },
                     message: isPastDay
-                        ? `Todos los horarios de hoy ya pasaron. Intenta con mañana.`
-                        : `${stylistName} no tiene disponibilidad el ${date}.`,
+                        ? `Todos los horarios de hoy ya pasaron. ¿Qué tal mañana?`
+                        : `${stylistNameFull} no tiene disponibilidad el ${date}. ¿Quieres probar otra fecha?`,
                     slots: []
                 });
             }
@@ -270,14 +320,14 @@ exports.checkAvailability = async (req, res) => {
 
                 return res.status(200).json({
                     available: isAvailable,
-                    stylist: { id: finalStylistId, name: stylistName },
+                    stylist: { id: finalStylistId, name: stylistNameFull },
                     service: { id: serviceId, name: serviceName, duration_minutes: duration },
                     date,
                     time: time.slice(0, 5),
                     slots: isAvailable ? [time.slice(0, 5)] : availableSlots.slice(0, 10),
                     message: isAvailable
-                        ? `${stylistName} está disponible el ${date} a las ${time}.`
-                        : `${stylistName} NO está disponible a las ${time}. Horarios disponibles:`
+                        ? `${stylistNameFull} está disponible el ${date} a las ${time}.`
+                        : `${stylistNameFull} NO está disponible a las ${time}. Horarios disponibles:`
                 });
             }
 
@@ -285,11 +335,11 @@ exports.checkAvailability = async (req, res) => {
 
             return res.status(200).json({
                 available: true,
-                stylist: { id: finalStylistId, name: stylistName },
+                stylist: { id: finalStylistId, name: stylistNameFull },
                 service: { id: serviceId, name: serviceName, duration_minutes: duration },
                 date,
                 slots: availableSlots.slice(0, 20),
-                message: `${stylistName} tiene disponibilidad el ${date}:`
+                message: `${stylistNameFull} tiene disponibilidad el ${date}:`
             });
         }
 
@@ -308,9 +358,9 @@ exports.checkAvailability = async (req, res) => {
 
         const stylistsWithSlots = [];
 
-        for (const stylist of allStylists) {
+        for (const stylistItem of allStylists) {
             const { slots, duration } = await getAvailableSlotsForStylist(
-                tenantId, stylist.id, serviceId, date, 15
+                tenantId, stylistItem.id, serviceId, date, 15
             );
 
             const filteredSlots = filterPastSlots(slots, date);
@@ -322,16 +372,16 @@ exports.checkAvailability = async (req, res) => {
                     const isAvailableAtTime = availableSlots.includes(time.slice(0, 5));
                     if (isAvailableAtTime) {
                         stylistsWithSlots.push({
-                            id: stylist.id,
-                            name: stylist.name,
+                            id: stylistItem.id,
+                            name: stylistItem.name,
                             available_at_requested_time: true,
                             slots: [time.slice(0, 5)]
                         });
                     }
                 } else {
                     stylistsWithSlots.push({
-                        id: stylist.id,
-                        name: stylist.name,
+                        id: stylistItem.id,
+                        name: stylistItem.name,
                         slots: availableSlots.slice(0, 10)
                     });
                 }
@@ -376,19 +426,19 @@ exports.bookAppointment = async (req, res) => {
         const { tenantId, clientId, serviceId, stylistId, stylistName, date, time } = req.body;
 
         if (!tenantId || !UUID_RE.test(tenantId)) {
-            return res.status(400).json({ error: 'tenantId inválido' });
+            return res.status(400).json({ booked: false, error: 'tenantId inválido' });
         }
 
         if (!clientId || !UUID_RE.test(clientId)) {
-            return res.status(400).json({ error: 'clientId inválido' });
+            return res.status(400).json({ booked: false, error: 'clientId inválido' });
         }
 
         if (!serviceId || !UUID_RE.test(serviceId)) {
-            return res.status(400).json({ error: 'serviceId inválido' });
+            return res.status(400).json({ booked: false, error: 'serviceId inválido' });
         }
 
         if (!date || !time) {
-            return res.status(400).json({ error: 'date y time requeridos' });
+            return res.status(400).json({ booked: false, error: 'date y time requeridos' });
         }
 
         console.log(`\n📝 [BOOK APPOINTMENT]`);
@@ -425,7 +475,7 @@ exports.bookAppointment = async (req, res) => {
         }
 
         if (!finalStylistId || !UUID_RE.test(finalStylistId)) {
-            return res.status(400).json({ error: 'stylistId o stylistName requerido' });
+            return res.status(400).json({ booked: false, error: 'stylistId o stylistName requerido' });
         }
 
         console.log(`   Estilista: ${finalStylistId.substring(0, 8)}...`);
@@ -569,7 +619,7 @@ exports.bookAppointment = async (req, res) => {
 };
 
 /* =================================================================== */
-/* =================  HELPER: OBTENER ESTILISTAS  ==================== */
+/* =================  HELPERS  ======================================= */
 /* =================================================================== */
 
 async function getAvailableStylists(tenantId, serviceId) {
