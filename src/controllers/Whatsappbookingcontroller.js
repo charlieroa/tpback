@@ -96,7 +96,17 @@ exports.searchService = async (req, res) => {
 
         // Buscar primero con múltiples variantes del nombre - SOLO servicios con estilistas asignados
         let result = await db.query(
-            `SELECT DISTINCT s.id, s.name, s.duration_minutes
+            `SELECT DISTINCT 
+                s.id, 
+                s.name, 
+                s.duration_minutes,
+                CASE 
+                  WHEN LOWER(TRIM(s.name)) = $6 THEN 1
+                  WHEN LOWER(TRIM(s.name)) = $7 THEN 2
+                  WHEN LOWER(TRIM(s.name)) LIKE $8 || '%' THEN 3
+                  WHEN LOWER(TRIM(s.name)) LIKE $9 || '%' THEN 4
+                  ELSE 5
+                END AS match_priority
              FROM services s
              INNER JOIN stylist_services ss ON s.id = ss.service_id
              INNER JOIN users u ON ss.user_id = u.id
@@ -110,15 +120,7 @@ exports.searchService = async (req, res) => {
                  OR LOWER(TRIM(s.name)) LIKE $4
                  OR LOWER(TRIM(s.name)) = $5
                )
-             ORDER BY 
-               CASE 
-                 WHEN LOWER(TRIM(s.name)) = $6 THEN 1
-                 WHEN LOWER(TRIM(s.name)) = $7 THEN 2
-                 WHEN LOWER(TRIM(s.name)) LIKE $8 || '%' THEN 3
-                 WHEN LOWER(TRIM(s.name)) LIKE $9 || '%' THEN 4
-                 ELSE 5
-               END,
-               s.name ASC
+             ORDER BY match_priority, s.name ASC
              LIMIT 10`,
             [
                 tenantId, 
