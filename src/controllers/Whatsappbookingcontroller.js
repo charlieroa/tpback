@@ -289,6 +289,10 @@ exports.checkAvailability = async (req, res) => {
         if (!finalStylistId && stylistName) {
             console.log(`   🔍 Buscando estilista por nombre: "${stylistName}"`);
 
+            const searchName = clean(stylistName).toLowerCase().trim();
+            const searchPattern = `%${searchName}%`;
+            
+            // Buscar con múltiples variaciones para manejar acentos y nombres completos
             const stylistResult = await db.query(
                 `SELECT u.id, u.first_name, u.last_name, u.working_hours
                  FROM users u
@@ -298,12 +302,20 @@ exports.checkAvailability = async (req, res) => {
                    AND ss.service_id = $2
                    AND COALESCE(NULLIF(u.status, ''), 'active') = 'active'
                    AND (
-                     LOWER(u.first_name) LIKE $3
-                     OR LOWER(u.last_name) LIKE $3
-                     OR LOWER(CONCAT(u.first_name, ' ', u.last_name)) LIKE $3
+                     LOWER(TRIM(u.first_name || ' ' || COALESCE(u.last_name, ''))) ILIKE $3
+                     OR LOWER(u.first_name) ILIKE $3
+                     OR LOWER(COALESCE(u.last_name, '')) ILIKE $3
+                     OR LOWER(u.first_name) ILIKE $4  -- Buscar solo primer nombre si coincide
                    )
+                 ORDER BY 
+                   CASE 
+                     WHEN LOWER(TRIM(u.first_name || ' ' || COALESCE(u.last_name, ''))) = LOWER($5) THEN 0
+                     WHEN LOWER(u.first_name) = LOWER($5) THEN 1
+                     WHEN LOWER(TRIM(u.first_name || ' ' || COALESCE(u.last_name, ''))) LIKE $6 THEN 2
+                     ELSE 3
+                   END
                  LIMIT 1`,
-                [tenantId, serviceId, `%${clean(stylistName).toLowerCase()}%`]
+                [tenantId, serviceId, searchPattern, `%${searchName}%`, searchName, `${searchName}%`]
             );
 
             if (stylistResult.rows.length === 0) {
@@ -315,22 +327,41 @@ exports.checkAvailability = async (req, res) => {
                 
                 console.log(`   💡 Estilistas disponibles: ${stylistNames.join(', ')}`);
                 
-                return res.status(200).json({
-                    available: false,
-                    error: `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
-                    message: stylistNames.length > 0
-                        ? `No encontré un estilista llamado "${stylistName}". Los estilistas disponibles son: ${stylistNames.join(', ')}. ¿Cuál prefieres?`
-                        : `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
-                    available_stylists: stylistNames
+                // Verificar si hay alguna coincidencia parcial (por si acaso es problema de acentos)
+                const normalizedSearch = searchName.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+                const partialMatch = allStylists.find(s => {
+                    const normalized = s.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+                    return normalized.includes(normalizedSearch) || normalizedSearch.includes(normalized.split(' ')[0]);
                 });
+                
+                if (partialMatch) {
+                    console.log(`   ✅ Coincidencia parcial encontrada: ${partialMatch.name}`);
+                    // Continuar con el estilista encontrado
+                    finalStylistId = partialMatch.id;
+                    stylistInfo = {
+                        id: partialMatch.id,
+                        name: partialMatch.name
+                    };
+                    console.log(`   ✅ Estilista encontrado (parcial): ${stylistInfo.name} (${finalStylistId})`);
+                } else {
+                    return res.status(200).json({
+                        available: false,
+                        error: `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
+                        message: stylistNames.length > 0
+                            ? `No encontré "${stylistName}". Disponibles: ${stylistNames.join(', ')}. ¿Cuál prefieres?`
+                            : `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
+                        available_stylists: stylistNames
+                    });
+                }
+            } else {
+                // Se encontró el estilista en la primera búsqueda
+                finalStylistId = stylistResult.rows[0].id;
+                stylistInfo = {
+                    id: finalStylistId,
+                    name: `${stylistResult.rows[0].first_name} ${stylistResult.rows[0].last_name || ''}`.trim()
+                };
+                console.log(`   ✅ Estilista encontrado: ${stylistInfo.name} (${finalStylistId})`);
             }
-
-            finalStylistId = stylistResult.rows[0].id;
-            stylistInfo = {
-                id: finalStylistId,
-                name: `${stylistResult.rows[0].first_name} ${stylistResult.rows[0].last_name || ''}`.trim()
-            };
-            console.log(`   ✅ Estilista encontrado: ${stylistInfo.name} (${finalStylistId})`);
         }
 
         // CASO A: Con estilista específico
@@ -353,7 +384,13 @@ exports.checkAvailability = async (req, res) => {
                 return res.status(400).json({ error: 'El estilista no está activo' });
             }
 
-            const stylistNameFull = `${stylist.first_name} ${stylist.last_name || ''}`.trim();
+            if (!stylistInfo) {
+                stylistInfo = {
+                    id: finalStylistId,
+                    name: `${stylist.first_name} ${stylist.last_name || ''}`.trim()
+                };
+            }
+            const stylistNameFull = stylistInfo.name;
 
             const offersService = await db.query(
                 'SELECT 1 FROM stylist_services WHERE user_id = $1 AND service_id = $2',
@@ -401,8 +438,8 @@ exports.checkAvailability = async (req, res) => {
                     time: time.slice(0, 5),
                     slots: isAvailable ? [time.slice(0, 5)] : availableSlots.slice(0, 10),
                     message: isAvailable
-                        ? `${stylistNameFull} está disponible el ${date} a las ${time}.`
-                        : `${stylistNameFull} NO está disponible a las ${time}. Horarios disponibles:`
+                        ? `${stylistNameFull} está disponible el ${date} a las ${time.slice(0, 5)}. ¿Confirmo tu cita?`
+                        : `${stylistNameFull} no está disponible el ${date} a las ${time.slice(0, 5)}. Horarios disponibles: ${availableSlots.slice(0, 6).join(', ')}. ¿Cuál prefieres?`
                 });
             }
 
@@ -414,7 +451,7 @@ exports.checkAvailability = async (req, res) => {
                 service: { id: serviceId, name: serviceName, duration_minutes: duration },
                 date,
                 slots: availableSlots.slice(0, 20),
-                message: `${stylistNameFull} tiene disponibilidad el ${date}:`
+                message: `${stylistNameFull} tiene disponible el ${date} en estos horarios: ${availableSlots.slice(0, 10).join(', ')}. ¿Cuál prefieres?`
             });
         }
 
