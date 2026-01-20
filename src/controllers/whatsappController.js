@@ -443,9 +443,10 @@ TIENES 3 FUNCIONES:
 🎯 FLUJO OBLIGATORIO (SIGUE EN ORDEN):
 ═══════════════════════════════════════════════════════════════
 
-PASO 1: BUSCAR SERVICIO PRIMERO
-- Si usuario menciona servicio → SIEMPRE llamar buscar_servicio PRIMERO
-- NO preguntes por estilista ANTES de buscar el servicio
+PASO 1: BUSCAR SERVICIO PRIMERO - ⚠️ OBLIGATORIO
+- Usuario dice: "quiero un servicio" / "necesito un servicio" / "corte" / "manicure" → LLAMAR buscar_servicio INMEDIATAMENTE
+- Si el usuario no especifica qué servicio, usa "servicio" como palabra clave: [buscar_servicio: service="servicio"]
+- NO respondas sin llamar la función. SIEMPRE llama buscar_servicio cuando alguien pide un servicio.
 - Si hay múltiples servicios → mostrar opciones y pedir confirmación
 - Si hay un solo servicio → guardar service_id y mostrar estilistas
 
@@ -468,32 +469,38 @@ PASO 4: CONFIRMAR Y AGENDAR
 EJEMPLOS CORRECTOS:
 ═══════════════════════════════════════════════════════════════
 
-EJEMPLO 1 - Fecha ya mencionada:
-Contexto: 📅 Fecha: 2026-01-22 (pasado mañana)
+EJEMPLO 1 - Usuario pide servicio genérico:
+Usuario: "quiero un servicio para mañana"
+→ Contexto guarda: 📅 Fecha: 2026-01-21
+→ [buscar_servicio: service="servicio"] OBLIGATORIO
+→ Mostrar todos los servicios disponibles
+
+EJEMPLO 2 - Fecha ya mencionada, usuario pide servicio específico:
+Contexto: 📅 Fecha: 2026-01-21 (mañana)
 Usuario: "corte"
-→ [buscar_servicio: "corte"] PRIMERO
-→ Mostrar opciones de servicios
+→ [buscar_servicio: "corte"] OBLIGATORIO
+→ Mostrar opciones: "Corte Caballero", "Barba más corte"
 Usuario: "corte caballero"
 → [buscar_servicio: "corte caballero"] otra vez si hay múltiples
 → Mostrar estilistas: Pedro, Carlos, Sofía
 Usuario: "sofia"
-→ YA HAY FECHA en contexto (2026-01-22)
-→ [verificar_disponibilidad: serviceId, stylistName="Sofia", date="2026-01-22"]
-→ "Sofía tiene disponible pasado mañana: 9:00, 10:00, 14:00..."
+→ YA HAY FECHA en contexto (2026-01-21)
+→ [verificar_disponibilidad: serviceId, stylistName="Sofia", date="2026-01-21"]
+→ "Sofía tiene disponible mañana: 9:00, 10:00, 14:00..."
 
-EJEMPLO 2 - Sin fecha previa:
+EJEMPLO 3 - Sin fecha previa:
 Contexto: 📋 Servicio: Corte Caballero (sin fecha)
 Usuario: "sofia"
 → NO hay fecha en contexto
 → "¡Perfecto! ¿Para qué fecha quieres tu cita con Sofía?"
 
-EJEMPLO 3 - Todo junto:
+EJEMPLO 4 - Todo junto:
 Usuario: "corte caballero con sofia mañana"
 → [buscar_servicio: "corte caballero"] PRIMERO
 → Guardar servicio, extraer fecha="mañana", estilista="sofia"
 → [verificar_disponibilidad con todos los datos]
 
-REGLA DE ORO: SIEMPRE busca el servicio PRIMERO antes de preguntar por estilista.`;
+REGLA DE ORO: Si el usuario pide un servicio (aunque sea genérico), LLAMA buscar_servicio INMEDIATAMENTE. No respondas sin llamar la función.`;
 
     // Funciones
     const FUNCTIONS = [
@@ -501,13 +508,13 @@ REGLA DE ORO: SIEMPRE busca el servicio PRIMERO antes de preguntar por estilista
             type: "function",
             function: {
                 name: "buscar_servicio",
-                description: "Busca un servicio y devuelve los estilistas que lo ofrecen",
+                description: "Busca un servicio y devuelve los estilistas que lo ofrecen. USA ESTA FUNCIÓN cuando el usuario pida un servicio (ej: 'quiero un servicio', 'necesito corte', 'manicure'). Si el usuario no especifica qué servicio, usa 'servicio' como palabra clave.",
                 parameters: {
                     type: "object",
                     properties: {
                         service: {
                             type: "string",
-                            description: "Nombre del servicio (ej: 'corte', 'manicure', 'tintura')"
+                            description: "Nombre del servicio. Si el usuario dice solo 'quiero un servicio', usa 'servicio'. Si dice 'corte', 'manicure', etc., usa esa palabra exacta."
                         }
                     },
                     required: ["service"]

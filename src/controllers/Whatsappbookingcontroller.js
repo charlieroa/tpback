@@ -45,6 +45,37 @@ exports.searchService = async (req, res) => {
         console.log(`\n🔍 [SEARCH SERVICE] Buscando: "${service}"`);
         console.log(`   Limpio: "${serviceName}" (palabras: ${serviceWords.join(', ')})`);
 
+        // Si solo quedó "servicio" o está vacío, mostrar todos los servicios
+        if (!serviceName || serviceName === 'servicio' || serviceWords.length === 0) {
+            console.log(`   ℹ️ Búsqueda genérica - mostrando todos los servicios`);
+            const allServices = await db.query(
+                `SELECT id, name, duration_minutes
+                 FROM services
+                 WHERE tenant_id = $1
+                 ORDER BY name ASC
+                 LIMIT 20`,
+                [tenantId]
+            );
+
+            if (allServices.rows.length === 0) {
+                return res.status(200).json({
+                    found: false,
+                    message: 'No hay servicios disponibles en este momento.'
+                });
+            }
+
+            return res.status(200).json({
+                found: true,
+                multiple: true,
+                options: allServices.rows.map(s => ({
+                    id: s.id,
+                    name: s.name,
+                    duration_minutes: Number(s.duration_minutes) || 60
+                })),
+                message: `Tenemos estos servicios disponibles:`
+            });
+        }
+
         // Buscar primero con el nombre limpio
         let result = await db.query(
             `SELECT id, name, duration_minutes
