@@ -36,11 +36,17 @@ exports.searchService = async (req, res) => {
             return res.status(400).json({ error: 'service requerido' });
         }
 
-        const serviceName = clean(service).toLowerCase();
-
+        // 🆕 Limpiar el nombre: remover palabras comunes como "de", "el", "la", "un", "una", "para"
+        const stopWords = ['de', 'del', 'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'para', 'con', 'y', 'o'];
+        const serviceClean = clean(service).toLowerCase();
+        const serviceWords = serviceClean.split(/\s+/).filter(word => !stopWords.includes(word));
+        const serviceName = serviceWords.join(' '); // "corte de caballero" → "corte caballero"
+        
         console.log(`\n🔍 [SEARCH SERVICE] Buscando: "${service}"`);
+        console.log(`   Limpio: "${serviceName}" (palabras: ${serviceWords.join(', ')})`);
 
-        const result = await db.query(
+        // Buscar primero con el nombre limpio
+        let result = await db.query(
             `SELECT id, name, duration_minutes
              FROM services
              WHERE tenant_id = $1
@@ -56,11 +62,38 @@ exports.searchService = async (req, res) => {
             [tenantId, `%${serviceName}%`, serviceName]
         );
 
+        // Si no hay resultados, buscar con cada palabra individualmente
+        if (result.rows.length === 0 && serviceWords.length > 0) {
+            console.log(`   🔄 Buscando con palabras individuales...`);
+            
+            // Construir condición OR para cada palabra
+            const wordConditions = serviceWords.map((_, i) => `LOWER(name) LIKE $${i + 2}`).join(' AND ');
+            const wordPatterns = serviceWords.map(w => `%${w}%`);
+            
+            result = await db.query(
+                `SELECT id, name, duration_minutes
+                 FROM services
+                 WHERE tenant_id = $1 AND (${wordConditions})
+                 ORDER BY name ASC
+                 LIMIT 5`,
+                [tenantId, ...wordPatterns]
+            );
+        }
+
         if (result.rows.length === 0) {
             console.log(`   ❌ No se encontró servicio`);
+            
+            // Buscar servicios similares para sugerir
+            const suggestions = await db.query(
+                `SELECT name FROM services WHERE tenant_id = $1 ORDER BY name LIMIT 10`,
+                [tenantId]
+            );
+            const suggestionNames = suggestions.rows.map(s => s.name);
+            
             return res.status(200).json({
                 found: false,
-                message: `No encontré un servicio llamado "${service}". ¿Puedes intentar con otro nombre?`
+                message: `No encontré un servicio llamado "${service}". ¿Puedes intentar con otro nombre?`,
+                suggestions: suggestionNames
             });
         }
 
