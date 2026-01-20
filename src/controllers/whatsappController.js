@@ -22,20 +22,28 @@ const bookingContextCache = new Map();
 
 function extractDateTimeFromMessage(message) {
     const result = { date: null, time: null };
-    const lower = message.toLowerCase();
+    
+    // Normalizar mensaje: reemplazar errores tipográficos comunes
+    let normalizedMessage = message.toLowerCase()
+        .replace(/ma[;:.,]ana/gi, 'mañana')      // ma;ana, ma:ana, ma.ana → mañana
+        .replace(/manana/gi, 'mañana')           // manana → mañana
+        .replace(/ma[ñn]ana/gi, 'mañana');       // mañana, manana → mañana
 
     console.log(`\n🔍 [EXTRACT] Analizando mensaje: "${message}"`);
+    if (normalizedMessage !== message.toLowerCase()) {
+        console.log(`   📝 Normalizado a: "${normalizedMessage}"`);
+    }
 
     // Fecha
     const datePatterns = [
-        { regex: /(?:para\s+)?(pasado\s*mañana|pasado\s*manana)/i, keyword: 'pasado mañana' },
-        { regex: /(?:para\s+)?(mañana|manana)/i, keyword: 'mañana' },
+        { regex: /(?:para\s+)?(pasado\s*mañana)/i, keyword: 'pasado mañana' },
+        { regex: /(?:para\s+)?(mañana)/i, keyword: 'mañana' },
         { regex: /(?:para\s+)?(hoy)/i, keyword: 'hoy' },
         { regex: /(?:para\s+)?(?:el\s+|este\s+)?(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)/i, extract: true },
     ];
 
     for (const pattern of datePatterns) {
-        const match = lower.match(pattern.regex);
+        const match = normalizedMessage.match(pattern.regex);
         if (match) {
             let dateInput = pattern.keyword || match[0];
             dateInput = dateInput.replace(/^para\s+/i, '').trim();
@@ -48,15 +56,17 @@ function extractDateTimeFromMessage(message) {
         }
     }
 
-    // Hora
+    // Hora - patrones mejorados
     const timePatterns = [
         /a\s+las\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|de\s+la\s+mañana|de\s+la\s+tarde|de\s+la\s+noche)?/i,
+        /las\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i,  // "las 2", "las 14"
         /\b(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)\b/i,
-        /(?:tipo|como\s+a\s+las)\s+(\d{1,2})/i,
+        /(?:tipo|como\s+a\s+las?)\s+(\d{1,2})/i,
+        /\b(\d{1,2}):(\d{2})\b/,  // "14:00"
     ];
 
     for (const pattern of timePatterns) {
-        const match = lower.match(pattern);
+        const match = normalizedMessage.match(pattern);
         if (match) {
             const timeStr = match[0];
             const normalized = normalizeHumanTimeToHHMM(timeStr);
@@ -645,7 +655,7 @@ Usuario: "sí"
             const checkParams = {
                 serviceId: functionArgs.serviceId || bookingContext.service_id,
                 stylistId: functionArgs.stylistId || bookingContext.stylist_id,
-                stylistName: functionArgs.stylistName,
+                stylistName: functionArgs.stylistName || bookingContext.stylist, // ← FIX: usar nombre del contexto
                 date: functionArgs.date || bookingContext.date,
                 time: functionArgs.time || bookingContext.time
             };
@@ -654,7 +664,7 @@ Usuario: "sí"
 
             functionResult = await callCheckAvailability(tenantId, checkParams);
 
-            // Guardar el stylist_id que devuelve el endpoint
+            // Guardar el stylist_id que devuelve el endpoint (caso: un solo estilista)
             if (functionResult.stylist && functionResult.stylist.id) {
                 updatedContext.stylist = functionResult.stylist.name;
                 updatedContext.stylist_id = functionResult.stylist.id;
@@ -665,6 +675,29 @@ Usuario: "sí"
             if (functionResult.needsDate && functionResult.stylist) {
                 updatedContext.stylist = functionResult.stylist.name;
                 updatedContext.stylist_id = functionResult.stylist.id;
+            }
+
+            // 🆕 Si el resultado tiene múltiples estilistas, buscar el que coincida con stylistName
+            if (functionResult.stylists && Array.isArray(functionResult.stylists) && checkParams.stylistName) {
+                const searchName = checkParams.stylistName.toLowerCase();
+                const matchedStylist = functionResult.stylists.find(s => 
+                    s.name.toLowerCase().includes(searchName) ||
+                    searchName.includes(s.name.toLowerCase().split(' ')[0])
+                );
+                
+                if (matchedStylist) {
+                    updatedContext.stylist = matchedStylist.name;
+                    updatedContext.stylist_id = matchedStylist.id;
+                    console.log(`   ✅ Estilista encontrado en lista: ${matchedStylist.name} (${matchedStylist.id})`);
+                    
+                    // Modificar el resultado para que GPT sepa qué estilista usar
+                    functionResult.matched_stylist = matchedStylist;
+                }
+            }
+
+            // Guardar fecha si viene en el resultado
+            if (functionResult.date && !bookingContext.date) {
+                updatedContext.date = functionResult.date;
             }
         }
         else if (functionName === 'agendar_cita') {
