@@ -18,6 +18,22 @@ const BLOCKING_STATUSES = [
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// ==================== PALABRAS CLAVE DE FECHA (NO SON HORAS) ====================
+/**
+ * 🔴 IMPORTANTE: Lista de palabras que son FECHAS, no HORAS
+ * Estas palabras NO deben procesarse como hora
+ */
+const DATE_KEYWORDS_REGEX = /^(hoy|mañana|manana|pasado\s*mañana|pasado\s*manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|tomorrow|today|en\s*\d+\s*d[ií]as?|en\s*una?\s*semanas?|el\s*\d{1,2}|para\s*el\s*\d{1,2})$/i;
+
+/**
+ * Verifica si un string es una palabra clave de fecha (no hora)
+ */
+function isDateKeyword(str) {
+  if (!str) return false;
+  const cleaned = clean(str).toLowerCase();
+  return DATE_KEYWORDS_REGEX.test(cleaned);
+}
+
 // ==================== UTILIDADES BÁSICAS ====================
 
 function clean(v) {
@@ -25,12 +41,24 @@ function clean(v) {
   return String(v).trim();
 }
 
+/**
+ * 🔴 CORREGIDO: cleanHHMM ahora detecta palabras de fecha y las ignora
+ */
 function cleanHHMM(v) {
   const s = clean(v);
   if (!s) return '';
-  // Si ya es HH:mm, devolverlo
+
+  // Si ya es HH:mm válido, devolverlo
   if (/^\d{2}:\d{2}$/.test(s)) return s;
-  // Intentar normalizar
+
+  // 🔴 IMPORTANTE: Detectar palabras de FECHA que NO son horas
+  // Esto evita que "mañana", "pasado mañana", etc. se procesen como hora
+  if (isDateKeyword(s)) {
+    console.log(`⚠️ [cleanHHMM] "${s}" es una palabra de FECHA, no de hora. Ignorando.`);
+    return '';
+  }
+
+  // Intentar normalizar como hora
   return normalizeHumanTimeToHHMM(s) || s;
 }
 
@@ -148,15 +176,15 @@ function normalizeDateKeyword(input) {
     return result;
   }
 
-  // "mañana"
-  if (/^(mañana|manana|tomorrow)$/.test(raw)) {
+  // "mañana" - con múltiples variantes de escritura
+  if (/^(mañana|manana|mañ|tomorrow)$/i.test(raw)) {
     const result = formatDateToYYYYMMDD(addDays(today, 1));
     console.log('   ✅ Detectado: mañana →', result);
     return result;
   }
 
-  // "pasado mañana"
-  if (/^(pasado\s*mañana|pasado\s*manana)$/.test(raw)) {
+  // "pasado mañana" - con múltiples variantes
+  if (/^(pasado\s*mañana|pasado\s*manana|pasadomañana|pasadomanana)$/i.test(raw)) {
     const result = formatDateToYYYYMMDD(addDays(today, 2));
     console.log('   ✅ Detectado: pasado mañana →', result);
     return result;
@@ -292,6 +320,8 @@ function normalizeDateKeyword(input) {
  * - "mediodía", "medianoche"
  * - "tipo 10", "como a las 3"
  * 
+ * 🔴 IMPORTANTE: NO procesa palabras de fecha como "mañana", "pasado mañana", etc.
+ * 
  * @param {string} input - Entrada del usuario
  * @returns {string} Hora en formato HH:mm o string vacío
  */
@@ -306,7 +336,26 @@ function normalizeHumanTimeToHHMM(input) {
   }
 
   console.log('🕐 [normalizeHumanTimeToHHMM] Input:', input);
-  console.log('   Input procesado (sin espacios):', raw);
+  console.log('   Input procesado (lowercase):', raw);
+
+  // 🔴 IMPORTANTE: Detectar palabras de FECHA que NO son horas
+  // Palabras como "mañana", "pasado mañana", días de la semana, etc.
+  const dateOnlyPatterns = [
+    /^(hoy|today)$/i,
+    /^(mañana|manana|tomorrow)$/i,
+    /^(pasado\s*mañana|pasado\s*manana|pasadomañana|pasadomanana)$/i,
+    /^(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)$/i,
+    /^(el\s*)?(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)$/i,
+    /^en\s*\d+\s*d[ií]as?$/i,
+    /^en\s*una?\s*semanas?$/i,
+  ];
+
+  for (const pattern of dateOnlyPatterns) {
+    if (pattern.test(raw)) {
+      console.log(`   ⚠️ "${raw}" es una palabra de FECHA, no de hora. Retornando vacío.`);
+      return '';
+    }
+  }
 
   // ===== CASOS ESPECIALES =====
 
@@ -342,7 +391,7 @@ function normalizeHumanTimeToHHMM(input) {
   if (hhmmMatch) {
     hour = parseInt(hhmmMatch[1], 10);
     minute = parseInt(hhmmMatch[2], 10);
-    console.log(`   Hora extraída: ${hour} | Minuto: ${minute} | AM/PM: ${isAM ? 'AM' : isPM ? 'PM' : 'no especificado'}`);
+    console.log(`   Hora extraída (HH:mm): ${hour}:${minute} | AM/PM: ${isAM ? 'AM' : isPM ? 'PM' : 'no especificado'}`);
   }
 
   // Patrón: solo número con am/pm o contexto
@@ -350,8 +399,14 @@ function normalizeHumanTimeToHHMM(input) {
   if (hour === null) {
     const hourOnlyMatch = raw.match(/(?:a\s*las|tipo|como\s*a\s*las|para\s*las)?\s*(\d{1,2})(?:\s*(?:am|pm|a\.m\.?|p\.m\.?|de\s*la|horas?))?/i);
     if (hourOnlyMatch) {
-      hour = parseInt(hourOnlyMatch[1], 10);
-      console.log(`   Hora extraída: ${hour} | Minuto: ${minute} | AM/PM: ${isAM ? 'AM' : isPM ? 'PM' : isTarde ? 'tarde' : isNoche ? 'noche' : isMañana ? 'mañana' : 'no especificado'}`);
+      const extractedHour = parseInt(hourOnlyMatch[1], 10);
+
+      // 🔴 Validar que sea una hora razonable (1-24)
+      // Esto evita que números grandes como "2026" se interpreten como hora
+      if (extractedHour >= 1 && extractedHour <= 24) {
+        hour = extractedHour;
+        console.log(`   Hora extraída (solo número): ${hour} | AM/PM: ${isAM ? 'AM' : isPM ? 'PM' : isTarde ? 'tarde' : isNoche ? 'noche' : isMañana ? 'mañana' : 'no especificado'}`);
+      }
     }
   }
 
@@ -616,6 +671,7 @@ module.exports = {
   // Utilidades básicas
   clean,
   cleanHHMM,
+  isDateKeyword,
 
   // Normalización de fechas y horas
   normalizeDateKeyword,
