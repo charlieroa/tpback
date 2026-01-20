@@ -604,14 +604,32 @@ exports.checkAvailability = async (req, res) => {
 
             console.log(`   ✅ ${availableSlots.length} horarios disponibles`);
 
+            // 🆕 Devolver TODOS los horarios disponibles (hasta 100 para no saturar)
+            const maxSlots = Math.min(availableSlots.length, 100);
+            
+            // 🆕 Crear mapeo explícito de números a horarios para cuando el usuario responda con un número
+            const slotsMap = {};
+            availableSlots12h.slice(0, maxSlots).forEach((slot12h, index) => {
+                slotsMap[index + 1] = {
+                    time_12h: slot12h,
+                    time_24h: availableSlots[index],
+                    option_number: index + 1
+                };
+            });
+            
             return res.status(200).json({
                 available: true,
                 stylist: { id: finalStylistId, name: stylistNameFull },
                 service: { id: serviceId, name: serviceName, duration_minutes: duration },
                 date,
-                slots: availableSlots.slice(0, 20),
-                slots_12h: availableSlots12h.slice(0, 20), // 🆕 Formato 12h
-                message: `${stylistNameFull} tiene disponible el ${date} en estos horarios: ${availableSlots12h.slice(0, 10).join(', ')}. ¿Cuál prefieres?`
+                slots: availableSlots.slice(0, maxSlots),
+                slots_12h: availableSlots12h.slice(0, maxSlots), // 🆕 Formato 12h - TODOS los disponibles
+                slots_map: slotsMap, // 🆕 Mapeo de números a horarios (ej: {1: {time_12h: "12:00 PM", time_24h: "12:00"}})
+                total_available: availableSlots.length, // 🆕 Total de horarios disponibles
+                message: availableSlots.length > 10
+                    ? `${stylistNameFull} tiene disponible el ${date} en múltiples horarios. ¿Qué hora te conviene?`
+                    : `${stylistNameFull} tiene disponible el ${date} en estos horarios: ${availableSlots12h.join(', ')}. ¿Cuál prefieres?`,
+                hint: `IMPORTANTE: Si el usuario responde con un número (ej: "1", "2", "3"), usa slots_map para mapear ese número a la hora correspondiente. Ejemplo: Si dice "2", usa slots_map[2].time_24h para llamar verificar_disponibilidad o agendar_cita.`
             });
         }
 

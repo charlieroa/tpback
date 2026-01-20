@@ -514,7 +514,10 @@ PASO 3: VERIFICAR DISPONIBILIDAD
   * Si NO está disponible: "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
   * Si no encuentra estilista: "No encontré [nombre]. Disponibles: [lista]"
 - ⚠️ IMPORTANTE: Usa el formato de 12 horas (AM/PM) para mostrar horarios. Si el resultado tiene "slots_12h", úsalo. Ejemplo: "9:00 AM", "2:00 PM", "12:00 PM"
-- 🆕 CRÍTICO: Si muestras horarios en una lista numerada (1, 2, 3...) y el usuario responde con un número (ej: "1", "uno", "la 1"), debes entender que se refiere a la opción de esa lista, NO a la hora. Ejemplo: Si mostraste "1. 12:00 PM, 2. 1:00 PM" y el usuario dice "1", significa 12:00 PM, NO 1:00 PM.
+- 🆕 CRÍTICO: Si muestras horarios en una lista numerada (1, 2, 3...) y el usuario responde con un número (ej: "1", "uno", "la 1"), debes entender que se refiere a la opción de esa lista, NO a la hora. 
+  * Si el resultado tiene "slots_map", ÚSALO para mapear el número a la hora correcta. Ejemplo: Si el usuario dice "2" y slots_map[2] = {time_12h: "12:15 PM", time_24h: "12:15"}, usa time_24h ("12:15") para verificar_disponibilidad o agendar_cita.
+  * Ejemplo: Si mostraste "1. 12:00 PM, 2. 12:15 PM" y el usuario dice "2", significa 12:15 PM (NO 1:00 PM ni 2:00 PM).
+- 🆕 MUESTRA TODOS LOS HORARIOS: Si el resultado tiene "slots_12h" con múltiples horarios, muestra TODOS en una lista numerada. NO limites a solo 10. Si hay muchos (más de 20), puedes agruparlos por rangos (ej: "9:00 AM - 12:00 PM, 2:00 PM - 6:00 PM") o mostrar todos en lista.
 
 PASO 4: CONFIRMAR Y AGENDAR
 - Usuario elige hora → confirmar
@@ -555,15 +558,16 @@ Usuario: "a las 9" o "9" o "tipo 9"
 → Si NO disponible: "Sofía no está disponible mañana a las 9:00. Horarios disponibles: 10:00, 11:00, 14:00. ¿Cuál prefieres?"
 
 EJEMPLO 5 - Usuario elige horario por número de lista:
-Contexto: Acabas de mostrar horarios numerados:
-  "1. 12:00 PM
-   2. 1:00 PM  
-   3. 1:15 PM
-   ¿Cuál prefieres?"
-Usuario: "1" o "uno" o "la 1"
-→ El usuario se refiere a la OPCIÓN 1 de la lista (12:00 PM), NO a la hora 1:00 PM
-→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="12:00"]
-→ "Perfecto, ¿confirmo tu cita para mañana a las 12:00 PM?"
+Contexto: Acabas de mostrar horarios numerados y verificar_disponibilidad devolvió slots_map:
+  slots_map = {
+    1: {time_12h: "12:00 PM", time_24h: "12:00"},
+    2: {time_12h: "12:15 PM", time_24h: "12:15"},
+    3: {time_12h: "1:00 PM", time_24h: "13:00"}
+  }
+Usuario: "2" o "dos" o "la 2"
+→ El usuario se refiere a la OPCIÓN 2 de la lista → slots_map[2].time_24h = "12:15"
+→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="12:15"]
+→ "Perfecto, ¿confirmo tu cita para mañana a las 12:15 PM?"
 
 EJEMPLO 3 - Sin fecha previa:
 Contexto: 📋 Servicio: Corte Caballero (sin fecha)
