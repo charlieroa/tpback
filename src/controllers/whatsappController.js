@@ -668,20 +668,27 @@ Usuario: "sí"
             }
         }
         else if (functionName === 'agendar_cita') {
+            // 🔧 IMPORTANTE: Usar el nombre del estilista del contexto si no viene en args
             const bookParams = {
                 serviceId: functionArgs.serviceId || bookingContext.service_id,
                 stylistId: functionArgs.stylistId || bookingContext.stylist_id,
-                stylistName: functionArgs.stylistName,
+                stylistName: functionArgs.stylistName || bookingContext.stylist, // ← FIX: usar nombre del contexto
                 date: functionArgs.date || bookingContext.date,
                 time: functionArgs.time || bookingContext.time
             };
 
-            console.log(`   📋 Params finales:`, JSON.stringify(bookParams));
+            console.log(`\n📝 [AGENDAR CITA] Preparando reserva`);
+            console.log(`   ClientId: ${clientId}`);
+            console.log(`   BookingContext completo:`, JSON.stringify(bookingContext, null, 2));
+            console.log(`   Params finales:`, JSON.stringify(bookParams, null, 2));
 
             functionResult = await callBookAppointment(tenantId, clientId, bookParams);
 
             if (functionResult.booked) {
                 updatedContext.booked = true;
+                console.log(`   ✅ Cita agendada exitosamente`);
+            } else {
+                console.log(`   ❌ Error al agendar:`, functionResult.error || functionResult.message);
             }
         }
 
@@ -782,21 +789,57 @@ async function callBookAppointment(tenantId, clientId, params) {
     try {
         const whatsappBookingController = require('./whatsappBookingController');
 
+        console.log('\n📞 [CALL BOOK APPOINTMENT]');
+        console.log('   TenantId:', tenantId);
+        console.log('   ClientId:', clientId);
+        console.log('   Params recibidos:', JSON.stringify(params, null, 2));
+
+        // Validaciones previas
+        if (!clientId) {
+            console.log('   ❌ Error: clientId no proporcionado');
+            return { booked: false, error: 'No se pudo identificar al cliente. Por favor intenta de nuevo.' };
+        }
+
+        if (!params.serviceId) {
+            console.log('   ❌ Error: serviceId no proporcionado');
+            return { booked: false, error: 'No se ha seleccionado un servicio. ¿Qué servicio deseas?' };
+        }
+
+        if (!params.stylistId && !params.stylistName) {
+            console.log('   ❌ Error: No hay stylistId ni stylistName');
+            return { booked: false, error: 'No se ha seleccionado un estilista. ¿Con quién te gustaría la cita?' };
+        }
+
+        if (!params.date) {
+            console.log('   ❌ Error: date no proporcionado');
+            return { booked: false, error: 'No se ha indicado la fecha. ¿Para qué día quieres la cita?' };
+        }
+
+        if (!params.time) {
+            console.log('   ❌ Error: time no proporcionado');
+            return { booked: false, error: 'No se ha indicado la hora. ¿A qué hora te gustaría?' };
+        }
+
         const mockReq = {
             body: { tenantId, clientId, ...params }
         };
 
         let responseData = null;
+        let statusCode = 200;
         const mockRes = {
-            status: (code) => mockRes,
+            status: (code) => { statusCode = code; return mockRes; },
             json: (data) => { responseData = data; return mockRes; }
         };
 
         await whatsappBookingController.bookAppointment(mockReq, mockRes);
-        return responseData || { booked: false, message: 'Error agendando cita' };
+        
+        console.log('   📋 Respuesta del endpoint:', JSON.stringify(responseData, null, 2));
+        console.log('   Status code:', statusCode);
+
+        return responseData || { booked: false, error: 'Error desconocido al agendar cita' };
     } catch (error) {
         console.error('❌ Error en callBookAppointment:', error);
-        return { booked: false, message: 'Error interno: ' + error.message };
+        return { booked: false, error: 'Error interno: ' + error.message };
     }
 }
 
