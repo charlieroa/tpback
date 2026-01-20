@@ -491,6 +491,7 @@ PASO 1: BUSCAR SERVICIO PRIMERO - ⚠️ OBLIGATORIO
 - NO respondas sin llamar la función. SIEMPRE llama buscar_servicio cuando alguien pide un servicio.
 - Si hay múltiples servicios → mostrar opciones y pedir confirmación
 - Si hay un solo servicio → guardar service_id y mostrar estilistas
+- ⚠️ CRÍTICO: Si el resultado tiene "stylists" con una lista, SOLO muestra esos estilistas. NO inventes estilistas. Si hay un "hint" que dice los nombres, usa SOLO esos nombres.
 
 PASO 2: ELEGIR ESTILISTA
 - Usuario elige estilista por nombre (ej: "sofia", "pedro", "carlos")

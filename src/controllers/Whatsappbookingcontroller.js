@@ -243,6 +243,11 @@ exports.searchService = async (req, res) => {
                     console.log(`   ✅ ${stylists.length} estilistas disponibles a las ${normalizedTime}`);
                 }
 
+                console.log(`   ✅ Estilistas encontrados: ${stylists.length}`);
+                if (stylists.length > 0) {
+                    console.log(`   📋 Estilistas que ofrecen "${exactMatch.name}":`, stylists.map(s => s.name).join(', '));
+                }
+
                 return res.status(200).json({
                     found: true,
                     service: {
@@ -253,7 +258,8 @@ exports.searchService = async (req, res) => {
                     stylists,
                     message: date && time
                         ? `Estos estilistas están disponibles para "${exactMatch.name}" el ${date} a las ${time}:`
-                        : `Estos estilistas ofrecen ${exactMatch.name}:`
+                        : `Estos estilistas ofrecen ${exactMatch.name}:`,
+                    hint: `IMPORTANTE: Solo muestra estos estilistas (${stylists.length}): ${stylists.map(s => s.name).join(', ')}. NO inventes estilistas que no estén en esta lista.`
                 });
             }
 
@@ -333,6 +339,9 @@ exports.searchService = async (req, res) => {
         }
 
         console.log(`   ✅ Estilistas encontrados: ${stylists.length}`);
+        if (stylists.length > 0) {
+            console.log(`   📋 Estilistas que ofrecen "${serviceData.name}":`, stylists.map(s => s.name).join(', '));
+        }
 
         return res.status(200).json({
             found: true,
@@ -344,7 +353,8 @@ exports.searchService = async (req, res) => {
             stylists,
             message: date && time
                 ? `Estos estilistas están disponibles para "${serviceData.name}" el ${date} a las ${time}:`
-                : `Estos estilistas ofrecen ${serviceData.name}:`
+                : `Estos estilistas ofrecen ${serviceData.name}:`,
+            hint: `IMPORTANTE: Solo muestra estos estilistas (${stylists.length}): ${stylists.map(s => s.name).join(', ')}. NO inventes estilistas que no estén en esta lista.`
         });
 
     } catch (error) {
