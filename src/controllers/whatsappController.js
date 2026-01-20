@@ -6,7 +6,7 @@ const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
 const { normalizeDateKeyword, normalizeHumanTimeToHHMM } = require('../utils/appointmentHelpers');
 
-console.log('🚀 [DEBUG] whatsappController.js cargado v10 (SIMPLIFICADO)');
+console.log('🚀 [DEBUG] whatsappController.js cargado v11 (CON STYLIST NAME)');
 
 const TIME_ZONE = 'America/Bogota';
 
@@ -415,14 +415,14 @@ async function processWithAI(apiKey, tenantId, clientId, userMessage, conversati
         }
     }
 
-    // System Prompt simplificado
+    // 🆕 System Prompt MEJORADO
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
 
 TIENES 3 FUNCIONES DISPONIBLES:
 1. buscar_servicio → Para buscar servicios y ver qué estilistas los ofrecen
-2. verificar_disponibilidad → Para ver horarios disponibles
-3. agendar_cita → Para confirmar la cita
+2. verificar_disponibilidad → Para ver horarios (acepta stylistName O stylistId)
+3. agendar_cita → Para confirmar la cita (acepta stylistName O stylistId)
 
 ═══════════════════════════════════════════════════════════════
 FLUJO DE AGENDAMIENTO (OBLIGATORIO):
@@ -430,59 +430,62 @@ FLUJO DE AGENDAMIENTO (OBLIGATORIO):
 
 PASO 1: SERVICIO
 - Usuario menciona servicio → llamar buscar_servicio
-- Resultado: Te dirá qué estilistas lo ofrecen
-- Acción: Mencionar TODOS los estilistas disponibles
+- Guardar service_id en contexto
+- Mostrar lista de estilistas disponibles
 
 PASO 2: FECHA (si no está en contexto)
 - Preguntar: "¿Para qué fecha?"
 - Guardar en contexto
 
-PASO 3: HORA (si no está en contexto)  
-- Preguntar: "¿A qué hora?"
+PASO 3: ESTILISTA
+- Cuando usuario elija estilista por NOMBRE (ej: "Sofia", "Carlos") →
+  llamar verificar_disponibilidad con stylistName="Sofia"
+- El endpoint buscará automáticamente el UUID
+- Mostrar horarios disponibles
+- Guardar stylist_id cuando lo recibas del resultado
+
+PASO 4: HORA
+- Usuario elige hora de los slots disponibles
 - Guardar en contexto
 
-PASO 4: ESTILISTA
-- Cuando usuario elija estilista → llamar verificar_disponibilidad
-- Mostrar horarios disponibles
-- Si dice "otro estilista" → llamar verificar_disponibilidad sin stylistId
-
 PASO 5: CONFIRMAR
-- Mostrar resumen
+- Mostrar resumen completo
 - Cuando diga "sí"/"confirmo"/"dale" → llamar agendar_cita
 
 ═══════════════════════════════════════════════════════════════
 REGLAS IMPORTANTES:
 ═══════════════════════════════════════════════════════════════
 - NUNCA inventes servicios o estilistas
+- SIEMPRE usa stylistName cuando el usuario diga un nombre
 - USA fecha/hora del contexto si ya existen
 - Respuestas CORTAS (máximo 2-3 oraciones)
 - Tono amigable y natural
 - Si usuario cancela → reiniciar flujo
 
 ═══════════════════════════════════════════════════════════════
-EJEMPLOS:
+EJEMPLOS CORREGIDOS:
 ═══════════════════════════════════════════════════════════════
 
-Usuario: "quiero un corte"
+Usuario: "quiero un corte para mañana"
 → [buscar_servicio: "corte"]
-→ Respuesta: "Para corte tenemos a: Juan, María y Carlos. ¿Con quién prefieres?"
+→ Respuesta: "Para corte tenemos a: Pedro, Carlos y Sofía. ¿Con quién prefieres?"
 
-Usuario: "con Juan para mañana"
-→ [verificar_disponibilidad: stylistId=juan, date="2026-01-21"]
-→ Respuesta: "Juan tiene disponible: 9:00, 10:00, 11:00, 14:00. ¿Cuál te sirve?"
+Usuario: "con Sofia"
+→ [verificar_disponibilidad: serviceId=xxx, stylistName="Sofia", date="2026-01-21"]
+→ Respuesta: "Sofía tiene disponible: 9:00, 10:00, 14:00. ¿Cuál te sirve?"
 
 Usuario: "a las 10"
-→ Respuesta: "Perfecto. ¿Confirmo tu cita de Corte con Juan para mañana a las 10:00?"
+→ Respuesta: "Perfecto. ¿Confirmo tu cita de Corte con Sofía mañana a las 10:00?"
 
 Usuario: "sí"
-→ [agendar_cita]
+→ [agendar_cita: con todos los IDs guardados en contexto]
 → Respuesta: "¡Listo! Tu cita quedó agendada..."
 
-Usuario: "hay otro estilista?"
-→ [verificar_disponibilidad: sin stylistId, con date y time]
+Usuario: "hay otro estilista disponible?"
+→ [verificar_disponibilidad: sin stylistId ni stylistName, solo con date y time]
 → Respuesta: "A las 10 también están disponibles: María y Carlos. ¿Con quién prefieres?"`;
 
-    // Funciones
+    // 🆕 Funciones ACTUALIZADAS con stylistName
     const FUNCTIONS = [
         {
             type: "function",
@@ -505,7 +508,7 @@ Usuario: "hay otro estilista?"
             type: "function",
             function: {
                 name: "verificar_disponibilidad",
-                description: "Verifica disponibilidad de horarios para un servicio. Puede ser con estilista específico o sin estilista para ver todos los disponibles.",
+                description: "Verifica disponibilidad de horarios. Puede usar stylistId (si ya lo tienes guardado) O stylistName (cuando el usuario menciona un nombre).",
                 parameters: {
                     type: "object",
                     properties: {
@@ -515,7 +518,11 @@ Usuario: "hay otro estilista?"
                         },
                         stylistId: {
                             type: "string",
-                            description: "UUID del estilista (opcional - si se omite, muestra todos los disponibles)"
+                            description: "UUID del estilista (opcional - solo si ya lo tienes guardado en el contexto)"
+                        },
+                        stylistName: {
+                            type: "string",
+                            description: "Nombre del estilista (opcional - úsalo cuando el usuario mencione un nombre como 'Sofia', 'Carlos', 'Pedro', etc.)"
                         },
                         date: {
                             type: "string",
@@ -534,16 +541,32 @@ Usuario: "hay otro estilista?"
             type: "function",
             function: {
                 name: "agendar_cita",
-                description: "Agenda la cita cuando el usuario confirma",
+                description: "Agenda la cita cuando el usuario confirma. Puede usar stylistId O stylistName.",
                 parameters: {
                     type: "object",
                     properties: {
-                        serviceId: { type: "string", description: "UUID del servicio" },
-                        stylistId: { type: "string", description: "UUID del estilista" },
-                        date: { type: "string", description: "Fecha YYYY-MM-DD" },
-                        time: { type: "string", description: "Hora HH:mm" }
+                        serviceId: {
+                            type: "string",
+                            description: "UUID del servicio"
+                        },
+                        stylistId: {
+                            type: "string",
+                            description: "UUID del estilista (usa esto si lo tienes guardado)"
+                        },
+                        stylistName: {
+                            type: "string",
+                            description: "Nombre del estilista (usa esto si no tienes el UUID)"
+                        },
+                        date: {
+                            type: "string",
+                            description: "Fecha YYYY-MM-DD"
+                        },
+                        time: {
+                            type: "string",
+                            description: "Hora HH:mm"
+                        }
                     },
-                    required: ["serviceId", "stylistId", "date", "time"]
+                    required: ["serviceId", "date", "time"]
                 }
             }
         }
@@ -603,27 +626,30 @@ Usuario: "hay otro estilista?"
             }
         }
         else if (functionName === 'verificar_disponibilidad') {
-            // Usar contexto para completar parámetros faltantes
+            // 🆕 PASAR stylistName también
             const checkParams = {
                 serviceId: functionArgs.serviceId || bookingContext.service_id,
                 stylistId: functionArgs.stylistId || bookingContext.stylist_id,
+                stylistName: functionArgs.stylistName, // 🆕 NUEVO
                 date: functionArgs.date || bookingContext.date,
                 time: functionArgs.time || bookingContext.time
             };
 
             functionResult = await callCheckAvailability(tenantId, checkParams);
 
-            // Guardar estilista si se verificó uno específico
-            if (checkParams.stylistId && functionResult.stylist) {
+            // 🆕 Guardar el stylist_id que devuelve el endpoint
+            if (functionResult.stylist && functionResult.stylist.id) {
                 updatedContext.stylist = functionResult.stylist.name;
                 updatedContext.stylist_id = functionResult.stylist.id;
+                console.log(`   ✅ Estilista guardado en contexto: ${functionResult.stylist.name} (${functionResult.stylist.id})`);
             }
         }
         else if (functionName === 'agendar_cita') {
-            // Usar contexto para completar parámetros
+            // 🆕 PASAR stylistName también
             const bookParams = {
                 serviceId: functionArgs.serviceId || bookingContext.service_id,
                 stylistId: functionArgs.stylistId || bookingContext.stylist_id,
+                stylistName: functionArgs.stylistName, // 🆕 NUEVO
                 date: functionArgs.date || bookingContext.date,
                 time: functionArgs.time || bookingContext.time
             };
