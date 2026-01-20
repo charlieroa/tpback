@@ -105,7 +105,7 @@ app.use('/api/cash', cashRoutes);
 app.use('/api/staff-purchases', staffPurchaseRoutes);
 app.use('/api/staff-loans', staffLoanRoutes);
 app.use('/api/whatsapp', whatsappRoutes); // ✅ NUEVO: Habilitar endpoints de WhatsApp
-app.use('/api/whatsapp-booking', require('./routes/whatsappBookingRoutes')); // ✅ Endpoints booking WhatsApp
+app.use('/api/whatsapp-booking', require('./routes/Whatsappbookingroutes')); // ✅ Endpoints booking WhatsApp
 app.use('/api/ai-chat', aiChatRoutes); // ✅ Chat con IA (OpenAI + Orquestador)
 app.post('/api/tenants/:tenantId/logo', upload.single('logo'), uploadTenantLogo);
 

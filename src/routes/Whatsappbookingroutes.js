@@ -3,7 +3,7 @@
 
 const express = require('express');
 const router = express.Router();
-const whatsappBookingController = require('../controllers/whatsappBookingController');
+const whatsappBookingController = require('../controllers/Whatsappbookingcontroller');
 
 console.log('📍 [ROUTES] whatsappBookingRoutes.js cargado');
 

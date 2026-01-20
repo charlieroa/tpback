@@ -776,7 +776,7 @@ Usuario: "sí"
 
 async function callSearchService(tenantId, service) {
     try {
-        const whatsappBookingController = require('./whatsappBookingController');
+        const whatsappBookingController = require('./Whatsappbookingcontroller');
 
         const mockReq = {
             body: { tenantId, service }
@@ -798,7 +798,7 @@ async function callSearchService(tenantId, service) {
 
 async function callCheckAvailability(tenantId, params) {
     try {
-        const whatsappBookingController = require('./whatsappBookingController');
+        const whatsappBookingController = require('./Whatsappbookingcontroller');
 
         const mockReq = {
             body: { tenantId, ...params }
@@ -820,7 +820,7 @@ async function callCheckAvailability(tenantId, params) {
 
 async function callBookAppointment(tenantId, clientId, params) {
     try {
-        const whatsappBookingController = require('./whatsappBookingController');
+        const whatsappBookingController = require('./Whatsappbookingcontroller');
 
         console.log('\n📞 [CALL BOOK APPOINTMENT]');
         console.log('   TenantId:', tenantId);
