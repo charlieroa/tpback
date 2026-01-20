@@ -561,11 +561,20 @@ exports.checkAvailability = async (req, res) => {
                 });
             }
 
-            const { slots, duration } = await getAvailableSlotsForStylist(
+            const { slots, duration, effectiveRanges } = await getAvailableSlotsForStylist(
                 tenantId, finalStylistId, serviceId, date, 15
             );
 
+            console.log(`   📊 Ranges efectivos para ${date}:`, effectiveRanges);
+            console.log(`   📊 Total slots generados: ${slots.length}`);
+            if (slots.length > 0) {
+                const firstSlot = toLocalHHmm(slots[0]);
+                const lastSlot = toLocalHHmm(slots[slots.length - 1]);
+                console.log(`   📊 Primer slot: ${firstSlot}, Último slot: ${lastSlot}`);
+            }
+
             const filteredSlots = filterPastSlots(slots, date);
+            console.log(`   📊 Slots después de filtrar pasados: ${filteredSlots.length}`);
 
             if (filteredSlots.length === 0) {
                 const isPastDay = slots.length > 0 && filteredSlots.length === 0;
