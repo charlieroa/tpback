@@ -428,58 +428,72 @@ async function processWithAI(apiKey, tenantId, clientId, userMessage, conversati
         }
     }
 
-    // 🆕 System Prompt MEJORADO - USA DATOS DEL CONTEXTO
+    // 🆕 System Prompt MEJORADO - FLUJO ORDENADO
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
 
-⚠️ IMPORTANTE: LEE LOS DATOS DE LA RESERVA ARRIBA. Si ya hay fecha, NO la vuelvas a preguntar.
+⚠️ CRÍTICO: USA LOS DATOS DEL CONTEXTO ARRIBA. Si dice "📅 Fecha: 2026-01-22", esa fecha YA ESTÁ GUARDADA.
 
-TIENES 3 FUNCIONES DISPONIBLES:
-1. buscar_servicio → Buscar servicios
-2. verificar_disponibilidad → Ver horarios disponibles  
-3. agendar_cita → Confirmar la cita
-
-═══════════════════════════════════════════════════════════════
-🎯 REGLAS CRÍTICAS (SIGUE EN ORDEN):
-═══════════════════════════════════════════════════════════════
-
-1. USA LOS DATOS DEL CONTEXTO - Si arriba dice "📅 Fecha: 2026-01-21", YA TIENES LA FECHA, no preguntes de nuevo.
-
-2. FLUJO:
-   - Usuario pide servicio → buscar_servicio
-   - Usuario elige estilista + YA HAY FECHA en contexto → verificar_disponibilidad INMEDIATAMENTE
-   - Usuario elige estilista + NO hay fecha → preguntar fecha
-   - Usuario da hora → pedir confirmación
-   - Usuario confirma → agendar_cita
-
-3. Respuestas CORTAS (2-3 oraciones máximo)
+TIENES 3 FUNCIONES:
+1. buscar_servicio → Buscar servicios (SIEMPRE PRIMERO)
+2. verificar_disponibilidad → Ver horarios (requiere servicio + estilista + fecha)
+3. agendar_cita → Confirmar cita
 
 ═══════════════════════════════════════════════════════════════
-EJEMPLOS:
+🎯 FLUJO OBLIGATORIO (SIGUE EN ORDEN):
 ═══════════════════════════════════════════════════════════════
 
-EJEMPLO 1 - Usuario ya dijo fecha antes:
-Contexto: 📅 Fecha: 2026-01-21, 📋 Servicio: Corte Caballero
-Usuario: "pedro está bien"
-→ YA TENEMOS FECHA en contexto, llamar verificar_disponibilidad directamente
-→ [verificar_disponibilidad: serviceId, stylistName="Pedro", date="2026-01-21"]
-→ "Pedro tiene disponible mañana: 9:00, 10:00, 14:00. ¿Cuál hora te sirve?"
+PASO 1: BUSCAR SERVICIO PRIMERO
+- Si usuario menciona servicio → SIEMPRE llamar buscar_servicio PRIMERO
+- NO preguntes por estilista ANTES de buscar el servicio
+- Si hay múltiples servicios → mostrar opciones y pedir confirmación
+- Si hay un solo servicio → guardar service_id y mostrar estilistas
 
-EJEMPLO 2 - Usuario NO ha dicho fecha:
+PASO 2: ELEGIR ESTILISTA
+- Usuario elige estilista por nombre (ej: "sofia", "pedro", "carlos")
+- SI HAY FECHA EN CONTEXTO → verificar_disponibilidad INMEDIATAMENTE con todos los datos
+  → Ejemplo: [verificar_disponibilidad: serviceId="xxx", stylistName="sofia", date="2026-01-22"]
+- SI NO HAY FECHA → preguntar: "¿Para qué fecha quieres tu cita con [nombre]?"
+
+PASO 3: VERIFICAR DISPONIBILIDAD
+- Usar fecha del contexto si existe
+- Llamar con: serviceId + stylistName + date (del contexto o nueva)
+- Mostrar horarios disponibles
+
+PASO 4: CONFIRMAR Y AGENDAR
+- Usuario elige hora → confirmar
+- Usuario dice "sí" → agendar_cita
+
+═══════════════════════════════════════════════════════════════
+EJEMPLOS CORRECTOS:
+═══════════════════════════════════════════════════════════════
+
+EJEMPLO 1 - Fecha ya mencionada:
+Contexto: 📅 Fecha: 2026-01-22 (pasado mañana)
+Usuario: "corte"
+→ [buscar_servicio: "corte"] PRIMERO
+→ Mostrar opciones de servicios
+Usuario: "corte caballero"
+→ [buscar_servicio: "corte caballero"] otra vez si hay múltiples
+→ Mostrar estilistas: Pedro, Carlos, Sofía
+Usuario: "sofia"
+→ YA HAY FECHA en contexto (2026-01-22)
+→ [verificar_disponibilidad: serviceId, stylistName="Sofia", date="2026-01-22"]
+→ "Sofía tiene disponible pasado mañana: 9:00, 10:00, 14:00..."
+
+EJEMPLO 2 - Sin fecha previa:
 Contexto: 📋 Servicio: Corte Caballero (sin fecha)
-Usuario: "pedro"
+Usuario: "sofia"
 → NO hay fecha en contexto
-→ "¡Perfecto! ¿Para qué fecha quieres tu cita con Pedro?"
+→ "¡Perfecto! ¿Para qué fecha quieres tu cita con Sofía?"
 
-EJEMPLO 3 - Usuario dice todo junto:
-Usuario: "quiero corte caballero con pedro mañana a las 2"
-→ Extraer: servicio="corte caballero", estilista="pedro", fecha=mañana, hora=14:00
+EJEMPLO 3 - Todo junto:
+Usuario: "corte caballero con sofia mañana"
+→ [buscar_servicio: "corte caballero"] PRIMERO
+→ Guardar servicio, extraer fecha="mañana", estilista="sofia"
 → [verificar_disponibilidad con todos los datos]
-→ Si disponible: "Pedro está disponible mañana a las 14:00 para Corte Caballero. ¿Confirmo?"
 
-EJEMPLO 4 - Confirmación:
-Usuario: "sí" / "dale" / "confirmo"
-→ [agendar_cita: usar IDs del contexto]`;
+REGLA DE ORO: SIEMPRE busca el servicio PRIMERO antes de preguntar por estilista.`;
 
     // Funciones
     const FUNCTIONS = [
@@ -621,6 +635,13 @@ Usuario: "sí" / "dale" / "confirmo"
                 updatedContext.service = functionResult.service.name;
                 updatedContext.service_id = functionResult.service.id;
                 console.log(`   ✅ Servicio guardado: ${functionResult.service.name} (${functionResult.service.id})`);
+                
+                // Si ya hay fecha en el contexto, recordarle a GPT que la use
+                if (bookingContext.date && functionResult.stylists && functionResult.stylists.length > 0) {
+                    console.log(`   📅 Fecha ya existe en contexto: ${bookingContext.date}`);
+                    functionResult.date_in_context = bookingContext.date;
+                    functionResult.hint = `Nota: Ya tienes fecha guardada (${bookingContext.date}). Cuando el usuario elija estilista, usa esa fecha para verificar disponibilidad.`;
+                }
             }
         }
         else if (functionName === 'verificar_disponibilidad') {

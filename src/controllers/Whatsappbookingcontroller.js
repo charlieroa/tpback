@@ -276,10 +276,21 @@ exports.checkAvailability = async (req, res) => {
             );
 
             if (stylistResult.rows.length === 0) {
+                console.log(`   ⚠️ No se encontró estilista con nombre "${stylistName}"`);
+                
+                // Buscar todos los estilistas disponibles para sugerir
+                const allStylists = await getAvailableStylists(tenantId, serviceId);
+                const stylistNames = allStylists.map(s => s.name);
+                
+                console.log(`   💡 Estilistas disponibles: ${stylistNames.join(', ')}`);
+                
                 return res.status(200).json({
                     available: false,
                     error: `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
-                    message: `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`
+                    message: stylistNames.length > 0
+                        ? `No encontré un estilista llamado "${stylistName}". Los estilistas disponibles son: ${stylistNames.join(', ')}. ¿Cuál prefieres?`
+                        : `No encontré un estilista llamado "${stylistName}" que ofrezca ${serviceName}.`,
+                    available_stylists: stylistNames
                 });
             }
 
