@@ -578,9 +578,14 @@ exports.checkAvailability = async (req, res) => {
             console.log(`   📊 Ranges efectivos para ${date}:`, effectiveRanges);
             console.log(`   📊 Total slots generados: ${slots.length}`);
             if (slots.length > 0) {
-                const firstSlot = toLocalHHmm(slots[0]);
-                const lastSlot = toLocalHHmm(slots[slots.length - 1]);
-                console.log(`   📊 Primer slot: ${firstSlot}, Último slot: ${lastSlot}`);
+                console.log(`   📊 Primer slot (UTC):`, slots[0].toISOString());
+                console.log(`   📊 Primer slot (Local):`, toLocalHHmm(slots[0]));
+                console.log(`   📊 Último slot (UTC):`, slots[slots.length - 1].toISOString());
+                console.log(`   📊 Último slot (Local):`, toLocalHHmm(slots[slots.length - 1]));
+                
+                // Verificar los primeros 5 slots para debugging
+                console.log(`   📊 Primeros 5 slots (raw):`, slots.slice(0, 5).map(s => s.toISOString()));
+                console.log(`   📊 Primeros 5 slots (local):`, slots.slice(0, 5).map(s => toLocalHHmm(s)));
             }
 
             const filteredSlots = filterPastSlots(slots, date);
