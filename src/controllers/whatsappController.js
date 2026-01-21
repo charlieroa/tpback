@@ -514,6 +514,15 @@ PASO 1: BUSCAR SERVICIO PRIMERO - ⚠️ OBLIGATORIO
 - Si hay un solo servicio → guardar service_id y mostrar estilistas
 - ⚠️ CRÍTICO: Si el resultado tiene "stylists" con una lista, SOLO muestra esos estilistas. NO inventes estilistas. Si hay un "hint" que dice los nombres, usa SOLO esos nombres.
 
+🆕 CASO ESPECIAL - Usuario dice TODO de una vez (servicio + estilista + fecha + hora):
+- Usuario dice: "Quiero una cita para mañana 9:30 am para corte con carlos roa"
+- ⚠️ IMPORTANTE: Aunque llames buscar_servicio primero, NO muestres la lista de estilistas
+- Extrae del mensaje: servicio="corte", estilista="carlos roa", fecha="mañana", hora="09:30"
+- Llama buscar_servicio solo para obtener el service_id (sin mostrar resultado al usuario)
+- Luego llama verificar_disponibilidad INMEDIATAMENTE con todos los datos
+- Responde DIRECTAMENTE: "Carlos está disponible mañana a las 9:30 AM. ¿Confirmo tu cita?"
+- NO digas: "Estos estilistas ofrecen..." si el usuario ya especificó un estilista
+
 PASO 2: ELEGIR ESTILISTA / FECHA
 - Si el usuario menciona una FECHA después de elegir servicio → Guardar fecha y MOSTRAR ESTILISTAS INMEDIATAMENTE
   → NO digas "He guardado la fecha" ni "Un momento, por favor"
@@ -617,25 +626,29 @@ Usuario: "sofia"
 → "¡Perfecto! ¿Para qué fecha quieres tu cita con Sofía?"
 
 EJEMPLO 4 - Todo junto (usuario dice todo de una vez):
-Usuario: "Quiero una cita para mañana 9:30 am para corte con carlos"
-→ [buscar_servicio: "corte"] PRIMERO para obtener el service_id
-→ Extraer del mensaje: fecha="mañana", hora="09:30", estilista="carlos"
-→ [verificar_disponibilidad: serviceId="...", stylistName="carlos", date="2026-01-21", time="09:30"]
-→ Si disponible: "Carlos está disponible mañana a las 9:30 AM para Corte Caballero. ¿Confirmo tu cita?"
+Usuario: "Quiero una cita para mañana 9:30 am para corte con carlos roa"
+→ [buscar_servicio: "corte"] PRIMERO para obtener el service_id (solo internamente, NO muestres la lista de estilistas)
+→ Extraer del mensaje: fecha="mañana", hora="09:30", estilista="carlos roa"
+→ [verificar_disponibilidad: serviceId="...", stylistName="carlos roa", date="2026-01-22", time="09:30"]
+→ ⚠️ NO muestres: "Estos estilistas ofrecen..." (el usuario ya eligió estilista)
+→ Responder DIRECTAMENTE: "Carlos está disponible mañana a las 9:30 AM. ¿Confirmo tu cita?"
 → Si NO disponible: "Carlos no está disponible a las 9:30 AM mañana. Horarios disponibles: 10:00 AM, 11:00 AM... ¿Cuál prefieres?"
 
 EJEMPLO 5 - Todo junto con nombre completo:
 Usuario: "corte caballero con carlos roa para el viernes a las 2pm"
-→ [buscar_servicio: "corte caballero"] PRIMERO
+→ [buscar_servicio: "corte caballero"] PRIMERO (solo para obtener service_id, NO muestres estilistas)
 → Extraer: fecha="viernes" → 2026-01-24, hora="14:00", estilista="carlos roa"
 → [verificar_disponibilidad: serviceId, stylistName="carlos roa", date="2026-01-24", time="14:00"]
-→ Responder directamente con disponibilidad
+→ ⚠️ NO muestres la lista de estilistas (el usuario ya eligió)
+→ Responder directamente con disponibilidad: "Carlos está disponible el viernes a las 2:00 PM. ¿Confirmo tu cita?"
 
 REGLA DE ORO: 
 - Si el usuario pide un servicio → LLAMA buscar_servicio INMEDIATAMENTE
+- ⚠️ Si el usuario menciona TODO de una vez (servicio + estilista + fecha + hora) → Llama buscar_servicio PERO NO muestres la lista de estilistas, ve directo a verificar_disponibilidad
 - Si tienes servicio + estilista + fecha en contexto → LLAMA verificar_disponibilidad AUTOMÁTICAMENTE
 - Si el usuario menciona una hora después de elegir estilista → LLAMA verificar_disponibilidad con la hora
-- SIEMPRE di el resultado directamente, NO digas "Voy a verificar" ni "Un momento"`;
+- SIEMPRE di el resultado directamente, NO digas "Voy a verificar" ni "Un momento"
+- ⚠️ NO muestres listas de estilistas si el usuario ya especificó qué estilista quiere`;
 
     // Funciones
     const FUNCTIONS = [
@@ -643,7 +656,7 @@ REGLA DE ORO:
             type: "function",
             function: {
                 name: "buscar_servicio",
-                description: "Busca un servicio y devuelve los estilistas que lo ofrecen. USA ESTA FUNCIÓN cuando el usuario pida un servicio (ej: 'quiero un servicio', 'necesito corte', 'manicure'). Si el usuario no especifica qué servicio, usa 'servicio' como palabra clave.",
+                description: "Busca un servicio y devuelve los estilistas que lo ofrecen. USA ESTA FUNCIÓN cuando el usuario pida un servicio (ej: 'quiero un servicio', 'necesito corte', 'manicure'). Si el usuario no especifica qué servicio, usa 'servicio' como palabra clave. ⚠️ IMPORTANTE: Si el usuario ya mencionó un estilista específico en su mensaje (ej: 'corte con carlos'), NO muestres la lista de estilistas, solo usa esta función para obtener el service_id y luego verifica disponibilidad directamente.",
                 parameters: {
                     type: "object",
                     properties: {
