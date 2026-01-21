@@ -386,8 +386,8 @@ function normalizeHumanTimeToHHMM(input) {
   if (/de\s*la\s*noche/i.test(raw)) isNoche = true;
   if (/de\s*la\s*mañana|de\s*la\s*manana/i.test(raw)) isMañana = true;
 
-  // Patrón: HH:mm (con o sin am/pm)
-  const hhmmMatch = raw.match(/(\d{1,2}):(\d{2})/);
+  // Patrón: HH:mm o HH.mm (con o sin am/pm) - Soporta "9:30" y "9.30"
+  const hhmmMatch = raw.match(/(\d{1,2})[:.](\d{2})/);
   if (hhmmMatch) {
     hour = parseInt(hhmmMatch[1], 10);
     minute = parseInt(hhmmMatch[2], 10);

@@ -67,11 +67,12 @@ function extractDateTimeFromMessage(message) {
 
     // Hora - patrones mejorados
     const timePatterns = [
-        /a\s+las\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|de\s+la\s+mañana|de\s+la\s+tarde|de\s+la\s+noche)?/i,
-        /las\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i,  // "las 2", "las 14"
-        /\b(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)\b/i,
-        /(?:tipo|como\s+a\s+las?)\s+(\d{1,2})/i,
-        /\b(\d{1,2}):(\d{2})\b/,  // "14:00"
+        /a\s+las\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|de\s+la\s+mañana|de\s+la\s+tarde|de\s+la\s+noche)?/i,
+        /las\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?/i,  // "las 2", "las 14", "las 9.30"
+        /\b(\d{1,2})[:.](\d{2})\s*(am|pm|a\.m\.|p\.m\.)\b/i,  // "9.30 am", "9:30 pm"
+        /\b(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)\b/i,  // "9 am", "2pm"
+        /(?:tipo|como\s+a\s+las?)\s+(\d{1,2})(?:[:.](\d{2}))?/i,  // "tipo 9.30"
+        /\b(\d{1,2})[:.](\d{2})\b/,  // "14:00", "9.30"
     ];
 
     for (const pattern of timePatterns) {
@@ -615,11 +616,20 @@ Usuario: "sofia"
 → NO hay fecha en contexto
 → "¡Perfecto! ¿Para qué fecha quieres tu cita con Sofía?"
 
-EJEMPLO 4 - Todo junto:
-Usuario: "corte caballero con sofia mañana"
+EJEMPLO 4 - Todo junto (usuario dice todo de una vez):
+Usuario: "Quiero una cita para mañana 9:30 am para corte con carlos"
+→ [buscar_servicio: "corte"] PRIMERO para obtener el service_id
+→ Extraer del mensaje: fecha="mañana", hora="09:30", estilista="carlos"
+→ [verificar_disponibilidad: serviceId="...", stylistName="carlos", date="2026-01-21", time="09:30"]
+→ Si disponible: "Carlos está disponible mañana a las 9:30 AM para Corte Caballero. ¿Confirmo tu cita?"
+→ Si NO disponible: "Carlos no está disponible a las 9:30 AM mañana. Horarios disponibles: 10:00 AM, 11:00 AM... ¿Cuál prefieres?"
+
+EJEMPLO 5 - Todo junto con nombre completo:
+Usuario: "corte caballero con carlos roa para el viernes a las 2pm"
 → [buscar_servicio: "corte caballero"] PRIMERO
-→ Guardar servicio, extraer fecha="mañana", estilista="sofia"
-→ [verificar_disponibilidad con todos los datos]
+→ Extraer: fecha="viernes" → 2026-01-24, hora="14:00", estilista="carlos roa"
+→ [verificar_disponibilidad: serviceId, stylistName="carlos roa", date="2026-01-24", time="14:00"]
+→ Responder directamente con disponibilidad
 
 REGLA DE ORO: 
 - Si el usuario pide un servicio → LLAMA buscar_servicio INMEDIATAMENTE
