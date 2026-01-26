@@ -760,8 +760,15 @@ exports.createAppointment = async (req, res) => {
       return res.status(400).json({ error: 'start_time inválido. Envíe ISO 8601 con zona o UTC.' });
     }
 
-    // ✅ Permitir/denegar pasado según tenant
-    await validatePastAppointment(tenant_id, startTimeDate);
+    // 🔧 Obtener el tenant_id del estilista para asegurar que la cita pertenezca al tenant correcto
+    const stylistResult = await db.query('SELECT tenant_id FROM users WHERE id = $1', [stylist_id]);
+    if (stylistResult.rows.length === 0) {
+      return res.status(404).json({ error: `Estilista con ID ${stylist_id} no encontrado.` });
+    }
+    const stylistTenantId = stylistResult.rows[0].tenant_id;
+
+    // ✅ Permitir/denegar pasado según tenant del estilista
+    await validatePastAppointment(stylistTenantId, startTimeDate);
 
     const offersService = await checkStylistOffersService(stylist_id, service_id);
     if (!offersService) {
@@ -775,14 +782,15 @@ exports.createAppointment = async (req, res) => {
       return res.status(200).json({
         dryRun: true,
         wouldCreate: {
-          tenant_id, client_id: final_client_id, stylist_id, service_id,
+          tenant_id: stylistTenantId, client_id: final_client_id, stylist_id, service_id,
           start_time: startTimeDate, end_time: endTimeDate, status: 'scheduled'
         },
         wouldUpdate: { stylist_last_turn_at: 'NOW()' }
       });
     }
 
-    const appointment = await createAppointmentRecord(tenant_id, final_client_id, stylist_id, service_id, startTimeDate, duration);
+    // 🔧 Usar el tenant_id del estilista, no el del usuario del dashboard
+    const appointment = await createAppointmentRecord(stylistTenantId, final_client_id, stylist_id, service_id, startTimeDate, duration);
     return res.status(201).json(appointment);
   } catch (error) {
     console.error('Error al crear la cita:', error);
@@ -815,8 +823,18 @@ exports.createAppointmentsBatch = async (req, res) => {
       const startTimeDate = new Date(start_time);
       if (isNaN(startTimeDate)) throw new Error('start_time inválido en una de las citas.');
 
-      // ✅ Permitir/denegar pasado según tenant
-      await validatePastAppointment(tenant_id, startTimeDate);
+      // 🔧 Obtener el tenant_id del estilista para asegurar que la cita pertenezca al tenant correcto
+      console.log(`[createAppointmentsBatch] Procesando cita - stylist_id: ${stylist_id}, service_id: ${service_id}, start_time: ${start_time}`);
+      const stylistResult = await db.query('SELECT tenant_id, first_name, last_name FROM users WHERE id = $1', [stylist_id]);
+      if (stylistResult.rows.length === 0) {
+        throw new Error(`Estilista con ID ${stylist_id} no encontrado.`);
+      }
+      const stylistTenantId = stylistResult.rows[0].tenant_id;
+      const stylistName = `${stylistResult.rows[0].first_name} ${stylistResult.rows[0].last_name || ''}`;
+      console.log(`[createAppointmentsBatch] Estilista: ${stylistName}, tenant_id del estilista: ${stylistTenantId}, tenant_id del usuario dashboard: ${tenant_id}`);
+
+      // ✅ Permitir/denegar pasado según tenant del estilista
+      await validatePastAppointment(stylistTenantId, startTimeDate);
 
       const offersService = await checkStylistOffersService(stylist_id, service_id);
       if (!offersService) {
@@ -825,7 +843,10 @@ exports.createAppointmentsBatch = async (req, res) => {
 
       const duration = await getServiceDurationMinutes(service_id, 60);
 
-      const appointment = await createAppointmentRecord(tenant_id, final_client_id, stylist_id, service_id, startTimeDate, duration);
+      // 🔧 Usar el tenant_id del estilista, no el del usuario del dashboard
+      console.log(`[createAppointmentsBatch] Creando cita con tenant_id: ${stylistTenantId} (del estilista)`);
+      const appointment = await createAppointmentRecord(stylistTenantId, final_client_id, stylist_id, service_id, startTimeDate, duration);
+      console.log(`[createAppointmentsBatch] ✅ Cita creada exitosamente: ${appointment.id}, fecha: ${startTimeDate.toISOString()}`);
       createdAppointments.push(appointment);
     }
 

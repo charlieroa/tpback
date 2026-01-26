@@ -12,6 +12,8 @@ const {
     toLocalHHmm,
     toLocal12Hour,
     convert24to12,
+    getDayRangesFromWorkingHours,
+    findNextAvailableDay,
 } = require('../utils/appointmentHelpers');
 
 const {
@@ -445,6 +447,40 @@ exports.checkAvailability = async (req, res) => {
 
         const service = serviceResult.rows[0];
         const serviceName = service.name;
+
+        // ═══════════════════════════════════════════════════════════════
+        // 🆕 VERIFICAR HORARIO DEL TENANT (PELUQUERÍA)
+        // ═══════════════════════════════════════════════════════════════
+        const tenantResult = await db.query('SELECT working_hours FROM tenants WHERE id = $1', [tenantId]);
+        if (tenantResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Tenant no encontrado' });
+        }
+
+        const tenantWorkingHours = tenantResult.rows[0].working_hours || {};
+        const tenantDayRanges = getDayRangesFromWorkingHours(tenantWorkingHours, date);
+
+        // Si el salón está cerrado ese día, buscar el siguiente día disponible
+        if (!Array.isArray(tenantDayRanges) || tenantDayRanges.length === 0) {
+            console.log(`   ⚠️ El salón está cerrado el ${date}`);
+            
+            const nextAvailableDay = findNextAvailableDay(tenantWorkingHours, date, 14);
+            
+            if (nextAvailableDay) {
+                return res.status(200).json({
+                    available: false,
+                    salonClosed: true,
+                    nextAvailableDay: nextAvailableDay.date,
+                    nextAvailableDayReadable: nextAvailableDay.readableDate,
+                    message: `Lo siento mucho, el establecimiento no tiene servicio el ${date}. Pero puedo ofrecerte desde el ${nextAvailableDay.readableDate}. ¿Te parece bien?`
+                });
+            } else {
+                return res.status(200).json({
+                    available: false,
+                    salonClosed: true,
+                    message: `Lo siento mucho, el establecimiento no tiene servicio el ${date}. ¿Te gustaría probar con otra fecha?`
+                });
+            }
+        }
 
         // ═══════════════════════════════════════════════════════════════
         // 🆕 RESOLVER ESTILISTA: Por ID o por Nombre

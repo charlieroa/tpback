@@ -1,5 +1,6 @@
 // src/controllers/stylistController.js
 const db = require('../config/db');
+const bcrypt = require('bcryptjs');
 
 /* ============================================================
    Utilidades compartidas
@@ -327,6 +328,14 @@ exports.updateStylist = async (req, res) => {
       fields.push(`${key} = $${idx++}`);
       values.push(req.body[key]);
     }
+  }
+
+  // Manejar actualización de contraseña si se proporciona
+  if (req.body.password && req.body.password.trim()) {
+    const salt = await bcrypt.genSalt(10);
+    const passwordHashed = await bcrypt.hash(req.body.password.trim(), salt);
+    fields.push(`password_hash = $${idx++}`);
+    values.push(passwordHashed);
   }
 
   if (fields.length === 0) {

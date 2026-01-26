@@ -680,6 +680,57 @@ function toLocalISO(utcDate) {
   return formatInTimeZone(utcDate, TIME_ZONE, "yyyy-MM-dd'T'HH:mm:ss");
 }
 
+/**
+ * Encuentra el siguiente día disponible del tenant a partir de una fecha
+ * @param {Object} workingHours - Horarios del tenant
+ * @param {string} startDateStr - Fecha de inicio en formato YYYY-MM-DD
+ * @param {number} maxDays - Número máximo de días a buscar (default: 14)
+ * @returns {Object|null} - { date: 'YYYY-MM-DD', dayName: 'lunes', ... } o null si no se encuentra
+ */
+function findNextAvailableDay(workingHours, startDateStr, maxDays = 14) {
+  if (!workingHours || typeof workingHours !== 'object') {
+    return null;
+  }
+
+  // Parsear la fecha como si fuera en la zona horaria local
+  const startDate = parse(startDateStr, 'yyyy-MM-dd', new Date());
+  if (!isValid(startDate)) {
+    return null;
+  }
+
+  // Convertir a zona horaria local para obtener el día correcto
+  const startDateLocal = toZonedTime(startDate, TIME_ZONE);
+  
+  const dayNames = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+  const dayNamesEN = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+  for (let i = 1; i <= maxDays; i++) {
+    const checkDate = addDays(startDateLocal, i);
+    const dateStr = formatInTimeZone(checkDate, TIME_ZONE, 'yyyy-MM-dd');
+    const dayOfWeek = checkDate.getDay();
+    const dayName = dayNames[dayOfWeek];
+    const dayNameEN = dayNamesEN[dayOfWeek];
+
+    // Verificar si el día está abierto
+    const dayValue = workingHours[dayName] || workingHours[dayNameEN];
+    const ranges = normalizeDayValueToRanges(dayValue);
+
+    if (ranges.length > 0) {
+      // Formatear fecha legible
+      const readableDate = formatInTimeZone(checkDate, TIME_ZONE, "EEEE d 'de' MMMM", { locale: es });
+      
+      return {
+        date: dateStr,
+        dayName: dayName,
+        readableDate: readableDate,
+        dayNumber: dayOfWeek
+      };
+    }
+  }
+
+  return null;
+}
+
 // ==================== EXPORTS ====================
 
 module.exports = {
@@ -714,4 +765,7 @@ module.exports = {
   toLocal12Hour,
   convert24to12,
   toLocalISO,
+
+  // Búsqueda de días disponibles
+  findNextAvailableDay,
 };

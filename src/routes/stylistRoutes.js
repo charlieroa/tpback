@@ -32,6 +32,27 @@ router.get('/', authMiddleware, (req, res, next) => {
 router.get('/stats', authMiddleware, stylistAppController.getDashboardStats);
 router.post('/location', authMiddleware, stylistAppController.updateLocation);
 
+// 📅 App Móvil: Bookings (Aceptar/Rechazar)
+router.get('/bookings/pending', authMiddleware, stylistAppController.getPendingBookings);
+router.get('/bookings/all', authMiddleware, stylistAppController.getAllBookings);
+router.post('/bookings/:bookingId/approve', authMiddleware, stylistAppController.approveBooking);
+router.post('/bookings/:bookingId/reject', authMiddleware, stylistAppController.rejectBooking);
+
+// 📋 App Móvil: Historial de Servicios
+router.get('/services/attended', authMiddleware, stylistAppController.getServicesAttended);
+
+// 💰 App Móvil: Ventas de Productos
+router.get('/products/sales', authMiddleware, stylistAppController.getProductSales);
+
+// 📍 App Móvil: Geolocalización y Tracking
+router.get('/geofence-config', authMiddleware, stylistAppController.getGeofenceConfig);
+router.get('/geofence-logs', authMiddleware, stylistAppController.getGeofenceLogs);
+router.get('/tracking', authMiddleware, stylistAppController.getStylistsTracking);
+
+// 📋 App Móvil: Fichero Digital (Posición en cola)
+router.get('/queue-position', authMiddleware, stylistAppController.getQueuePosition);
+router.get('/smart-queue', authMiddleware, stylistAppController.getSmartQueue);
+
 // 💇‍♀️ Servicios por estilista (después de las rutas específicas)
 router.get('/:id/services', authMiddleware, stylistController.getStylistServices);
 router.post('/:id/services', authMiddleware, stylistController.setStylistServices);

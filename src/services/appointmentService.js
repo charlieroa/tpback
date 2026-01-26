@@ -383,6 +383,7 @@ async function createAppointmentRecord(tenantId, clientId, stylistId, serviceId,
 
   console.log('\n' + '📝'.repeat(40));
   console.log('📝 [DIGITURNO] Creando cita...');
+  console.log('   Tenant ID:', tenantId);
   console.log('   Cliente:', clientId.substring(0, 8) + '...');
   console.log('   Estilista:', stylistId.substring(0, 8) + '...');
   console.log('   Servicio:', serviceId.substring(0, 8) + '...');

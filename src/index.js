@@ -48,11 +48,25 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('No permitido por la política de CORS.'));
+    // Permitir requests sin origin (Postman, mobile apps, etc.)
+    if (!origin) {
+      return callback(null, true);
     }
+    
+    // Permitir orígenes específicos
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // En desarrollo: permitir cualquier localhost (para Flutter Web, etc.)
+    if (process.env.NODE_ENV !== 'production') {
+      const localhostRegex = /^https?:\/\/localhost(:\d+)?$/;
+      if (localhostRegex.test(origin)) {
+        return callback(null, true);
+      }
+    }
+    
+    callback(new Error('No permitido por la política de CORS.'));
   },
   credentials: true,
 };

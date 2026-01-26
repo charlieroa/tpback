@@ -147,9 +147,43 @@ exports.handleWahaWebhook = async (req, res) => {
             const phoneNumber = chatId.split('@')[0];
             let notifyName = payload.notifyName || payload._data?.notifyName || payload.pushName || payload._data?.pushName || '';
 
+            // 🔧 Función helper para separar nombre completo en first_name y last_name
+            const parseFullName = (fullName) => {
+                if (!fullName || fullName.trim() === '') return { firstName: null, lastName: null };
+                
+                const trimmed = fullName.trim();
+                const invalidNames = ['cliente', 'hola', 'buenos', 'días', 'tardes', 'noches', 'hi', 'hello', 'whatsapp'];
+                
+                // Si es un nombre inválido, retornar null
+                if (invalidNames.includes(trimmed.toLowerCase())) {
+                    return { firstName: null, lastName: null };
+                }
+                
+                // Si es solo un número, retornar null
+                if (/^\d+$/.test(trimmed)) {
+                    return { firstName: null, lastName: null };
+                }
+                
+                // Separar por espacios
+                const parts = trimmed.split(/\s+/).filter(p => p.length > 0);
+                
+                if (parts.length === 0) return { firstName: null, lastName: null };
+                if (parts.length === 1) return { firstName: parts[0], lastName: null };
+                
+                // Si tiene 2 o más partes, primera es nombre, resto es apellido
+                return {
+                    firstName: parts[0],
+                    lastName: parts.slice(1).join(' ')
+                };
+            };
+
             // Gestión de cliente
             let clientId = null;
             let senderName = notifyName || 'Cliente';
+            const parsedName = parseFullName(notifyName);
+            
+            console.log(`   📋 Nombre de display recibido: "${notifyName}"`);
+            console.log(`   📋 Nombre parseado: first_name="${parsedName.firstName}", last_name="${parsedName.lastName}"`);
 
             try {
                 const existingClient = await db.query(
@@ -160,27 +194,120 @@ exports.handleWahaWebhook = async (req, res) => {
 
                 if (existingClient.rows.length > 0) {
                     clientId = existingClient.rows[0].id;
-                    const savedFirstName = existingClient.rows[0].first_name;
-                    const savedLastName = existingClient.rows[0].last_name;
+                    let savedFirstName = existingClient.rows[0].first_name;
+                    let savedLastName = existingClient.rows[0].last_name;
 
+                    // 🔧 Si el cliente existe pero tiene nombre genérico y llegó un notifyName válido, actualizarlo
                     const invalidNames = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
+                    const hasInvalidName = !savedFirstName || 
+                                          savedFirstName.length < 2 || 
+                                          /^\d+$/.test(savedFirstName) || 
+                                          invalidNames.includes(savedFirstName.toLowerCase());
+                    
+                    if (hasInvalidName && parsedName.firstName && parsedName.firstName.length >= 2) {
+                        // Actualizar el nombre del cliente con el notifyName
+                        try {
+                            await db.query(
+                                `UPDATE users 
+                                 SET first_name = $1, last_name = $2, updated_at = NOW()
+                                 WHERE id = $3 AND tenant_id = $4 AND role_id = 4`,
+                                [parsedName.firstName, parsedName.lastName, clientId, tenantId]
+                            );
+                            savedFirstName = parsedName.firstName;
+                            savedLastName = parsedName.lastName;
+                            console.log(`   ✅ Nombre del cliente actualizado desde display: ${parsedName.firstName} ${parsedName.lastName || ''}`);
+                        } catch (updateError) {
+                            console.error(`   ⚠️ Error al actualizar nombre desde display: ${updateError.message}`);
+                        }
+                    }
+
+                    // Usar el nombre guardado (actualizado o existente) para senderName
                     if (savedFirstName && savedFirstName.length >= 2 && !/^\d+$/.test(savedFirstName) && !invalidNames.includes(savedFirstName.toLowerCase())) {
                         senderName = savedLastName && savedLastName.length >= 2 ? `${savedFirstName} ${savedLastName}`.trim() : savedFirstName;
                     }
+                    console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId})`);
                 } else {
-                    const newClient = await db.query(
-                        `INSERT INTO users (tenant_id, role_id, first_name, phone, email, password_hash)
-                         VALUES ($1, 4, $2, $3, $4, 'whatsapp')
-                         RETURNING id`,
-                        [tenantId, senderName, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                    );
-                    if (newClient.rows.length > 0) {
-                        clientId = newClient.rows[0].id;
-                        console.log(`   🆕 Nuevo cliente: ${senderName}`);
+                    // Intentar crear nuevo cliente con mejor manejo de errores
+                    try {
+                        // Usar el nombre parseado si es válido, sino usar "Cliente"
+                        const firstNameToUse = parsedName.firstName || 'Cliente';
+                        const lastNameToUse = parsedName.lastName || null;
+                        
+                        const newClient = await db.query(
+                            `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                             VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
+                             RETURNING id`,
+                            [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                        );
+                        if (newClient.rows.length > 0) {
+                            clientId = newClient.rows[0].id;
+                            senderName = lastNameToUse ? `${firstNameToUse} ${lastNameToUse}` : firstNameToUse;
+                            console.log(`   🆕 Nuevo cliente creado: ${senderName} (ID: ${clientId})`);
+                        }
+                    } catch (insertError) {
+                        // Si falla por duplicado (puede haber un race condition), intentar buscar de nuevo
+                        if (insertError.code === '23505' || insertError.message.includes('duplicate') || insertError.message.includes('unique')) {
+                            console.log(`   ⚠️ Cliente duplicado detectado, buscando nuevamente...`);
+                            const retryClient = await db.query(
+                                `SELECT id, first_name, last_name FROM users
+                                 WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
+                                [tenantId, phoneNumber]
+                            );
+                            if (retryClient.rows.length > 0) {
+                                clientId = retryClient.rows[0].id;
+                                const retryFirstName = retryClient.rows[0].first_name;
+                                const retryLastName = retryClient.rows[0].last_name;
+                                senderName = retryLastName ? `${retryFirstName} ${retryLastName}` : retryFirstName;
+                                console.log(`   ✅ Cliente encontrado después de retry: ${senderName} (ID: ${clientId})`);
+                            } else {
+                                console.error(`   ❌ Error al crear cliente (duplicado pero no encontrado): ${insertError.message}`);
+                            }
+                        } else {
+                            console.error(`   ❌ Error al crear cliente: ${insertError.message}`);
+                            throw insertError; // Re-lanzar si es otro tipo de error
+                        }
                     }
                 }
             } catch (clientError) {
-                console.error('   ⚠️ Error cliente:', clientError.message);
+                console.error('   ❌ Error crítico en gestión de cliente:', clientError.message);
+                console.error('   Stack:', clientError.stack);
+                // No lanzar el error, pero registrar que clientId es null
+                // El proceso continuará y fallará en callBookAppointment con un mensaje más claro
+            }
+
+            // Validar que tenemos clientId antes de continuar
+            if (!clientId) {
+                console.error(`   ⚠️ ADVERTENCIA: No se pudo obtener/crear clientId para ${phoneNumber}`);
+            }
+
+            // 🔧 Detectar si el mensaje contiene un nombre completo (para actualizar el cliente)
+            // Patrón: dos palabras que no son números ni comandos comunes
+            const namePattern = /^([A-Za-zÁÉÍÓÚáéíóúÑñ]+)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]+)$/;
+            const potentialName = userMessage.trim();
+            if (namePattern.test(potentialName) && clientId) {
+                const match = potentialName.match(namePattern);
+                const firstName = match[1];
+                const lastName = match[2];
+                
+                // Validar que no sean nombres genéricos
+                const invalidNames = ['cliente', 'hola', 'buenos', 'días', 'tardes', 'noches', 'hi', 'hello', 'si', 'sí', 'no'];
+                if (firstName.length >= 2 && lastName.length >= 2 && 
+                    !invalidNames.includes(firstName.toLowerCase()) && 
+                    !invalidNames.includes(lastName.toLowerCase())) {
+                    
+                    try {
+                        await db.query(
+                            `UPDATE users 
+                             SET first_name = $1, last_name = $2, updated_at = NOW()
+                             WHERE id = $3 AND tenant_id = $4 AND role_id = 4`,
+                            [firstName, lastName, clientId, tenantId]
+                        );
+                        console.log(`   ✅ Nombre del cliente actualizado: ${firstName} ${lastName}`);
+                        senderName = `${firstName} ${lastName}`;
+                    } catch (updateError) {
+                        console.error(`   ⚠️ Error al actualizar nombre del cliente: ${updateError.message}`);
+                    }
+                }
             }
 
             // Manejar notas de voz
@@ -495,6 +622,11 @@ async function processWithAI(apiKey, tenantId, clientId, userMessage, conversati
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
 
+⚠️ IMPORTANTE - IDENTIFICACIÓN DE CLIENTE:
+- Si el usuario proporciona su nombre completo (ej: "Fredy castellanos", "Juan Pérez"), esto es para identificarlo en el sistema.
+- Si ya tienes todos los datos de la cita (servicio, estilista, fecha, hora) y el usuario proporciona su nombre, intenta agendar la cita de nuevo.
+- El nombre del usuario se usará para actualizar su perfil en el sistema.
+
 ⚠️ CRÍTICO: USA LOS DATOS DEL CONTEXTO ARRIBA. Si dice "📅 Fecha: 2026-01-22", esa fecha YA ESTÁ GUARDADA.
 
 TIENES 3 FUNCIONES:
@@ -545,6 +677,7 @@ PASO 3: VERIFICAR DISPONIBILIDAD
 - Usar fecha del contexto si existe
 - Llamar con: serviceId + stylistName + date (del contexto o nueva)
 - RESPUESTA DIRECTA: No digas "Voy a verificar" o "Un momento". Di directamente el resultado:
+  * Si el salón está cerrado ese día (salonClosed: true): Usa el mensaje exacto del resultado que incluye el siguiente día disponible. Ejemplo: "Lo siento mucho, el establecimiento no tiene servicio el [fecha]. Pero puedo ofrecerte desde el [siguiente día disponible]. ¿Te parece bien?"
   * Si está disponible: "[Nombre] tiene disponible [fecha] en estos horarios: [lista]"
   * Si NO está disponible: "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
   * Si no encuentra estilista: "No encontré [nombre]. Disponibles: [lista]"
@@ -857,6 +990,12 @@ REGLA DE ORO:
             if (functionResult.date && !bookingContext.date) {
                 updatedContext.date = functionResult.date;
             }
+
+            // 🆕 Si el salón está cerrado y hay un siguiente día disponible, sugerirlo
+            if (functionResult.salonClosed && functionResult.nextAvailableDay) {
+                console.log(`   ⚠️ Salón cerrado ese día. Siguiente día disponible: ${functionResult.nextAvailableDay}`);
+                // No actualizamos el contexto automáticamente, pero el mensaje ya incluye la sugerencia
+            }
         }
         else if (functionName === 'agendar_cita') {
             // 🔧 IMPORTANTE: Usar el nombre del estilista del contexto si no viene en args
@@ -873,7 +1012,16 @@ REGLA DE ORO:
             console.log(`   BookingContext completo:`, JSON.stringify(bookingContext, null, 2));
             console.log(`   Params finales:`, JSON.stringify(bookParams, null, 2));
 
-            functionResult = await callBookAppointment(tenantId, clientId, bookParams);
+            // Validar clientId antes de intentar agendar
+            if (!clientId) {
+                console.log(`   ❌ Error: clientId es null o undefined`);
+                functionResult = {
+                    booked: false,
+                    error: 'No se pudo identificar tu número de teléfono. Por favor, asegúrate de que tu número esté registrado en nuestro sistema o contacta directamente con el salón.'
+                };
+            } else {
+                functionResult = await callBookAppointment(tenantId, clientId, bookParams);
+            }
 
             if (functionResult.booked) {
                 updatedContext.booked = true;
