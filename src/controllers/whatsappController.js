@@ -5,6 +5,7 @@ const wahaService = require('../services/wahaService');
 const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
 const { normalizeDateKeyword, normalizeHumanTimeToHHMM } = require('../utils/appointmentHelpers');
+const crypto = require('crypto');
 
 console.log('🚀 [DEBUG] whatsappController.js cargado v12 (FECHA OBLIGATORIA ANTES DE ESTILISTA)');
 
@@ -233,12 +234,31 @@ exports.handleWahaWebhook = async (req, res) => {
                         const firstNameToUse = parsedName.firstName || 'Cliente';
                         const lastNameToUse = parsedName.lastName || null;
                         
-                        const newClient = await db.query(
-                            `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                             VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
-                             RETURNING id`,
-                            [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                        );
+                        // 🔧 Generar UUID explícitamente para evitar error de not-null constraint
+                        // Intentar usar gen_random_uuid() de PostgreSQL, si falla usar crypto.randomUUID() de Node.js
+                        let newClient;
+                        try {
+                            newClient = await db.query(
+                                `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                 VALUES (gen_random_uuid(), $1, 4, $2, $3, $4, $5, 'whatsapp')
+                                 RETURNING id`,
+                                [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                            );
+                        } catch (genUuidError) {
+                            // Si gen_random_uuid() no está disponible, usar crypto.randomUUID()
+                            if (genUuidError.message.includes('function') || genUuidError.message.includes('gen_random_uuid')) {
+                                console.log(`   ⚠️ gen_random_uuid() no disponible, usando crypto.randomUUID()`);
+                                const newClientId = crypto.randomUUID();
+                                newClient = await db.query(
+                                    `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                     VALUES ($1, $2, 4, $3, $4, $5, $6, 'whatsapp')
+                                     RETURNING id`,
+                                    [newClientId, tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                                );
+                            } else {
+                                throw genUuidError;
+                            }
+                        }
                         if (newClient.rows.length > 0) {
                             clientId = newClient.rows[0].id;
                             senderName = lastNameToUse ? `${firstNameToUse} ${lastNameToUse}` : firstNameToUse;
