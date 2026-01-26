@@ -210,11 +210,41 @@ exports.handleWahaWebhook = async (req, res) => {
             console.log(`   📋 Nombre parseado: first_name="${parsedName.firstName || 'null'}", last_name="${parsedName.lastName || 'null'}"`);
 
             try {
-                const existingClient = await db.query(
-                    `SELECT id, first_name, last_name FROM users
+                // 🔧 MEJORADO: Buscar cliente por teléfono O por nombre (si tenemos display name válido)
+                let existingClient = await db.query(
+                    `SELECT id, first_name, last_name, phone FROM users
                      WHERE tenant_id = $1 AND phone = $2 AND role_id = 4`,
                     [tenantId, phoneNumber]
                 );
+
+                // Si no se encontró por teléfono y tenemos un nombre válido, buscar por nombre
+                if (existingClient.rows.length === 0 && parsedName.firstName && parsedName.firstName.length >= 2) {
+                    console.log(`   🔍 No se encontró por teléfono, buscando por nombre: "${parsedName.firstName}"`);
+                    const nameSearch = await db.query(
+                        `SELECT id, first_name, last_name, phone FROM users
+                         WHERE tenant_id = $1 
+                           AND role_id = 4
+                           AND LOWER(first_name) = LOWER($2)
+                           ${parsedName.lastName ? 'AND (LOWER(last_name) = LOWER($3) OR last_name IS NULL OR last_name = \'\')' : 'AND (last_name IS NULL OR last_name = \'\')'}
+                         ORDER BY created_at DESC
+                         LIMIT 1`,
+                        parsedName.lastName 
+                            ? [tenantId, parsedName.firstName, parsedName.lastName]
+                            : [tenantId, parsedName.firstName]
+                    );
+                    
+                    if (nameSearch.rows.length > 0) {
+                        existingClient = nameSearch;
+                        console.log(`   ✅ Cliente encontrado por nombre: ${nameSearch.rows[0].first_name} (teléfono actual: ${nameSearch.rows[0].phone})`);
+                        console.log(`   📱 Actualizando teléfono de ${nameSearch.rows[0].phone} a ${phoneNumber}`);
+                        
+                        // Actualizar el teléfono del cliente existente
+                        await db.query(
+                            `UPDATE users SET phone = $1, updated_at = NOW() WHERE id = $2`,
+                            [phoneNumber, nameSearch.rows[0].id]
+                        );
+                    }
+                }
 
                 if (existingClient.rows.length > 0) {
                     clientId = existingClient.rows[0].id;
@@ -261,8 +291,14 @@ exports.handleWahaWebhook = async (req, res) => {
                     // Usar el nombre guardado (actualizado o existente) para senderName
                     if (savedFirstName && savedFirstName.length >= 2 && !/^\d+$/.test(savedFirstName) && !invalidNames.includes(savedFirstName.toLowerCase())) {
                         senderName = savedLastName && savedLastName.length >= 2 ? `${savedFirstName} ${savedLastName}`.trim() : savedFirstName;
+                    } else if (parsedName.firstName && parsedName.firstName.length >= 2) {
+                        // Si el nombre guardado no es válido pero tenemos un display name válido, usarlo
+                        senderName = parsedName.lastName && parsedName.lastName.length >= 2 
+                            ? `${parsedName.firstName} ${parsedName.lastName}`.trim() 
+                            : parsedName.firstName;
+                        console.log(`   ℹ️ Usando display name para senderName: "${senderName}"`);
                     }
-                    console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId})`);
+                    console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber})`);
                 } else {
                     // Intentar crear nuevo cliente con mejor manejo de errores
                     try {
@@ -311,7 +347,24 @@ exports.handleWahaWebhook = async (req, res) => {
                         if (newClient.rows.length > 0) {
                             clientId = newClient.rows[0].id;
                             senderName = lastNameToUse ? `${firstNameToUse} ${lastNameToUse}` : firstNameToUse;
-                            console.log(`   🆕 Nuevo cliente creado: ${senderName} (ID: ${clientId})`);
+                            console.log(`   🆕 Nuevo cliente creado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber})`);
+                            
+                            // Si el nombre es "Cliente" pero tenemos un display name válido, intentar actualizarlo
+                            if (firstNameToUse === 'Cliente' && parsedName.firstName && parsedName.firstName.length >= 2) {
+                                console.log(`   🔄 Actualizando nombre de "Cliente" a "${parsedName.firstName}"`);
+                                try {
+                                    await db.query(
+                                        `UPDATE users SET first_name = $1, last_name = $2, updated_at = NOW() WHERE id = $3`,
+                                        [parsedName.firstName, parsedName.lastName, clientId]
+                                    );
+                                    senderName = parsedName.lastName && parsedName.lastName.length >= 2 
+                                        ? `${parsedName.firstName} ${parsedName.lastName}`.trim() 
+                                        : parsedName.firstName;
+                                    console.log(`   ✅ Nombre actualizado a: ${senderName}`);
+                                } catch (updateError) {
+                                    console.error(`   ⚠️ Error al actualizar nombre: ${updateError.message}`);
+                                }
+                            }
                         }
                     } catch (insertError) {
                         // Si falla por duplicado (puede haber un race condition), intentar buscar de nuevo
@@ -350,34 +403,7 @@ exports.handleWahaWebhook = async (req, res) => {
             }
 
             // 🔧 Detectar si el mensaje contiene un nombre completo (para actualizar el cliente)
-            // Patrón: dos palabras que no son números ni comandos comunes
-            const namePattern = /^([A-Za-zÁÉÍÓÚáéíóúÑñ]+)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]+)$/;
-            const potentialName = userMessage.trim();
-            if (namePattern.test(potentialName) && clientId) {
-                const match = potentialName.match(namePattern);
-                const firstName = match[1];
-                const lastName = match[2];
-                
-                // Validar que no sean nombres genéricos
-                const invalidNames = ['cliente', 'hola', 'buenos', 'días', 'tardes', 'noches', 'hi', 'hello', 'si', 'sí', 'no'];
-                if (firstName.length >= 2 && lastName.length >= 2 && 
-                    !invalidNames.includes(firstName.toLowerCase()) && 
-                    !invalidNames.includes(lastName.toLowerCase())) {
-                    
-                    try {
-                        await db.query(
-                            `UPDATE users 
-                             SET first_name = $1, last_name = $2, updated_at = NOW()
-                             WHERE id = $3 AND tenant_id = $4 AND role_id = 4`,
-                            [firstName, lastName, clientId, tenantId]
-                        );
-                        console.log(`   ✅ Nombre del cliente actualizado: ${firstName} ${lastName}`);
-                        senderName = `${firstName} ${lastName}`;
-                    } catch (updateError) {
-                        console.error(`   ⚠️ Error al actualizar nombre del cliente: ${updateError.message}`);
-                    }
-                }
-            }
+            // Esto se maneja ahora arriba cuando se detecta que no tiene nombre válido
 
             // Manejar notas de voz
             if (messageType === 'ptt' || messageType === 'audio') {
@@ -481,6 +507,48 @@ exports.handleWahaWebhook = async (req, res) => {
             // Reinicio de conversación
             const simpleGreetings = /^(hola|buenos días|buenas tardes|buenas noches|hi|hey|hello|ola)[\s!.]*$/i;
             const resetCommands = /(empezar de nuevo|cancelar|reset|reiniciar|nueva cita|otro servicio)/i;
+
+            // 🔧 NUEVO: Detectar si el usuario no tiene nombre y necesita proporcionarlo
+            const hasInvalidName = !senderName || 
+                                  senderName === 'Cliente' || 
+                                  senderName.length < 2 || 
+                                  /^\d+$/.test(senderName) ||
+                                  ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'].includes(senderName.toLowerCase());
+            
+            // Si no tiene nombre válido y envía un saludo, preguntarle su nombre
+            if (hasInvalidName && simpleGreetings.test(userMessage.trim()) && conversationHistory.length === 0) {
+                console.log(`   👤 Usuario sin nombre detectado, preguntando nombre...`);
+                await wahaService.sendMessage(tenantId, chatId, '¡Hola! 👋 Para poder ayudarte mejor, ¿podrías decirme tu nombre completo?');
+                return res.status(200).send('OK');
+            }
+
+            // Si no tiene nombre válido y el mensaje parece ser un nombre (2+ palabras), guardarlo
+            if (hasInvalidName && clientId) {
+                const namePattern = /^([A-Za-zÁÉÍÓÚáéíóúÑñ]{2,})\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]{2,})$/;
+                const potentialName = userMessage.trim();
+                if (namePattern.test(potentialName)) {
+                    const match = potentialName.match(namePattern);
+                    const firstName = match[1];
+                    const lastName = match[2];
+                    
+                    const invalidNames = ['cliente', 'hola', 'buenos', 'días', 'tardes', 'noches', 'hi', 'hello', 'si', 'sí', 'no'];
+                    if (!invalidNames.includes(firstName.toLowerCase()) && !invalidNames.includes(lastName.toLowerCase())) {
+                        try {
+                            await db.query(
+                                `UPDATE users 
+                                 SET first_name = $1, last_name = $2, updated_at = NOW()
+                                 WHERE id = $3 AND tenant_id = $4 AND role_id = 4`,
+                                [firstName, lastName, clientId, tenantId]
+                            );
+                            console.log(`   ✅ Nombre del cliente guardado: ${firstName} ${lastName}`);
+                            senderName = `${firstName} ${lastName}`;
+                            // Continuar con el flujo normal después de guardar el nombre
+                        } catch (updateError) {
+                            console.error(`   ⚠️ Error al guardar nombre: ${updateError.message}`);
+                        }
+                    }
+                }
+            }
 
             if ((simpleGreetings.test(userMessage.trim()) || resetCommands.test(userMessage.trim())) && conversationHistory.length > 0) {
                 console.log(`🔄 Limpiando conversación para ${senderName}`);
