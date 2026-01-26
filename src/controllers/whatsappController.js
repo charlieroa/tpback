@@ -252,26 +252,15 @@ exports.handleWahaWebhook = async (req, res) => {
                     let savedFirstName = existingClient.rows[0].first_name;
                     let savedLastName = existingClient.rows[0].last_name;
 
-                    // 🔧 Actualizar el nombre si el notifyName es válido y diferente al guardado
+                    // 🔧 SIMPLIFICADO: Si el cliente existe (role_id = 4) y tiene display name válido, actualizar el nombre en BD
                     const invalidNames = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
-                    const hasInvalidName = !savedFirstName || 
-                                          savedFirstName.length < 2 || 
-                                          /^\d+$/.test(savedFirstName) || 
-                                          invalidNames.includes(savedFirstName.toLowerCase());
+                    const hasInvalidSavedName = !savedFirstName || 
+                                               savedFirstName.length < 2 || 
+                                               /^\d+$/.test(savedFirstName) || 
+                                               invalidNames.includes(savedFirstName.toLowerCase());
                     
-                    // Determinar si debemos actualizar el nombre
-                    const shouldUpdateName = parsedName.firstName && parsedName.firstName.length >= 2 && (
-                        // Caso 1: El nombre guardado es inválido
-                        hasInvalidName ||
-                        // Caso 2: El notifyName tiene apellido y el guardado no
-                        (parsedName.lastName && parsedName.lastName.length >= 2 && (!savedLastName || savedLastName.length < 2)) ||
-                        // Caso 3: El notifyName es diferente al guardado (y es válido)
-                        (parsedName.firstName.toLowerCase() !== savedFirstName.toLowerCase() && 
-                         !invalidNames.includes(parsedName.firstName.toLowerCase()))
-                    );
-                    
-                    if (shouldUpdateName) {
-                        // Actualizar el nombre del cliente con el notifyName
+                    // Si tenemos un display name válido Y el nombre guardado es inválido, actualizarlo
+                    if (parsedName.firstName && parsedName.firstName.length >= 2 && hasInvalidSavedName) {
                         try {
                             await db.query(
                                 `UPDATE users 
@@ -285,8 +274,6 @@ exports.handleWahaWebhook = async (req, res) => {
                         } catch (updateError) {
                             console.error(`   ⚠️ Error al actualizar nombre desde display: ${updateError.message}`);
                         }
-                    } else if (parsedName.firstName && parsedName.firstName.length >= 2) {
-                        console.log(`   ℹ️ Nombre del display ("${parsedName.firstName}") no se actualiza porque el nombre guardado ("${savedFirstName}") es válido y similar`);
                     }
 
                     // Usar el nombre guardado (actualizado o existente) para senderName
@@ -294,13 +281,12 @@ exports.handleWahaWebhook = async (req, res) => {
                         senderName = savedLastName && savedLastName.length >= 2 ? `${savedFirstName} ${savedLastName}`.trim() : savedFirstName;
                         hasNameInDB = true; // ✅ Tiene nombre válido en BD
                     } else if (parsedName.firstName && parsedName.firstName.length >= 2) {
-                        // Si el nombre guardado no es válido pero tenemos un display name válido, usarlo
+                        // Si el nombre guardado no es válido pero tenemos un display name válido, usarlo temporalmente
                         senderName = parsedName.lastName && parsedName.lastName.length >= 2 
                             ? `${parsedName.firstName} ${parsedName.lastName}`.trim() 
                             : parsedName.firstName;
-                        console.log(`   ℹ️ Usando display name para senderName: "${senderName}"`);
-                        // No establecer hasNameInDB = true aquí porque el nombre no está en BD, solo en display
-                        // El bot debería preguntar el nombre si no está en BD
+                        console.log(`   ℹ️ Usando display name para senderName: "${senderName}" (no está en BD aún)`);
+                        // hasNameInDB permanece false para que el bot pregunte el nombre
                     }
                     console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber}, tieneNombreEnBD: ${hasNameInDB})`);
                 } else {
