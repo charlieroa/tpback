@@ -147,19 +147,28 @@ exports.handleWahaWebhook = async (req, res) => {
 
             const phoneNumber = chatId.split('@')[0];
             
-            // 🔍 Diagnosticar qué campos de nombre están disponibles en el payload
-            const notifyNameRaw = payload.notifyName || payload._data?.notifyName;
-            const pushNameRaw = payload.pushName || payload._data?.pushName;
-            let notifyName = notifyNameRaw || pushNameRaw || '';
+            // 🔍 MEJORADO: Buscar display name en múltiples lugares del payload
+            const notifyNameRaw = payload.notifyName || payload._data?.notifyName || payload.author?.notifyName || payload.contact?.notifyName;
+            const pushNameRaw = payload.pushName || payload._data?.pushName || payload.author?.pushName || payload.contact?.pushName;
+            const contactName = payload.contact?.name || payload.author?.name || payload.name;
+            let notifyName = notifyNameRaw || pushNameRaw || contactName || '';
             
-            // Log de diagnóstico para entender qué viene en el payload
+            // Log completo del payload para diagnóstico (solo cuando no hay nombre)
             if (!notifyName || notifyName.trim() === '') {
-                console.log(`   ⚠️ DIAGNÓSTICO - Display name vacío o no disponible:`);
+                console.log(`   ⚠️ DIAGNÓSTICO - Display name vacío o no disponible para ${phoneNumber}:`);
                 console.log(`      payload.notifyName: "${payload.notifyName || '(no existe)'}"`);
                 console.log(`      payload._data?.notifyName: "${payload._data?.notifyName || '(no existe)'}"`);
                 console.log(`      payload.pushName: "${payload.pushName || '(no existe)'}"`);
                 console.log(`      payload._data?.pushName: "${payload._data?.pushName || '(no existe)'}"`);
+                console.log(`      payload.contact?.name: "${payload.contact?.name || '(no existe)'}"`);
+                console.log(`      payload.contact?.notifyName: "${payload.contact?.notifyName || '(no existe)'}"`);
+                console.log(`      payload.author?.name: "${payload.author?.name || '(no existe)'}"`);
+                console.log(`      payload.author?.notifyName: "${payload.author?.notifyName || '(no existe)'}"`);
+                console.log(`      payload.name: "${payload.name || '(no existe)'}"`);
                 console.log(`      payload.from: "${payload.from || '(no existe)'}"`);
+                console.log(`      📦 Payload completo (keys): ${Object.keys(payload).join(', ')}`);
+            } else {
+                console.log(`   ✅ Display name encontrado: "${notifyName}" (fuente: ${notifyNameRaw ? 'notifyName' : pushNameRaw ? 'pushName' : 'contact/author'})`);
             }
 
             // 🔧 Función helper para separar nombre completo en first_name y last_name
