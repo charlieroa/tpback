@@ -146,7 +146,21 @@ exports.handleWahaWebhook = async (req, res) => {
             let isVoiceMessage = false;
 
             const phoneNumber = chatId.split('@')[0];
-            let notifyName = payload.notifyName || payload._data?.notifyName || payload.pushName || payload._data?.pushName || '';
+            
+            // 🔍 Diagnosticar qué campos de nombre están disponibles en el payload
+            const notifyNameRaw = payload.notifyName || payload._data?.notifyName;
+            const pushNameRaw = payload.pushName || payload._data?.pushName;
+            let notifyName = notifyNameRaw || pushNameRaw || '';
+            
+            // Log de diagnóstico para entender qué viene en el payload
+            if (!notifyName || notifyName.trim() === '') {
+                console.log(`   ⚠️ DIAGNÓSTICO - Display name vacío o no disponible:`);
+                console.log(`      payload.notifyName: "${payload.notifyName || '(no existe)'}"`);
+                console.log(`      payload._data?.notifyName: "${payload._data?.notifyName || '(no existe)'}"`);
+                console.log(`      payload.pushName: "${payload.pushName || '(no existe)'}"`);
+                console.log(`      payload._data?.pushName: "${payload._data?.pushName || '(no existe)'}"`);
+                console.log(`      payload.from: "${payload.from || '(no existe)'}"`);
+            }
 
             // 🔧 Función helper para separar nombre completo en first_name y last_name
             const parseFullName = (fullName) => {
@@ -183,8 +197,8 @@ exports.handleWahaWebhook = async (req, res) => {
             let senderName = notifyName || 'Cliente';
             const parsedName = parseFullName(notifyName);
             
-            console.log(`   📋 Nombre de display recibido: "${notifyName}"`);
-            console.log(`   📋 Nombre parseado: first_name="${parsedName.firstName}", last_name="${parsedName.lastName}"`);
+            console.log(`   📋 Nombre de display recibido: "${notifyName}" ${notifyName ? '(válido)' : '(vacío - usando "Cliente")'}`);
+            console.log(`   📋 Nombre parseado: first_name="${parsedName.firstName || 'null'}", last_name="${parsedName.lastName || 'null'}"`);
 
             try {
                 const existingClient = await db.query(
@@ -198,14 +212,25 @@ exports.handleWahaWebhook = async (req, res) => {
                     let savedFirstName = existingClient.rows[0].first_name;
                     let savedLastName = existingClient.rows[0].last_name;
 
-                    // 🔧 Si el cliente existe pero tiene nombre genérico y llegó un notifyName válido, actualizarlo
+                    // 🔧 Actualizar el nombre si el notifyName es válido y diferente al guardado
                     const invalidNames = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
                     const hasInvalidName = !savedFirstName || 
                                           savedFirstName.length < 2 || 
                                           /^\d+$/.test(savedFirstName) || 
                                           invalidNames.includes(savedFirstName.toLowerCase());
                     
-                    if (hasInvalidName && parsedName.firstName && parsedName.firstName.length >= 2) {
+                    // Determinar si debemos actualizar el nombre
+                    const shouldUpdateName = parsedName.firstName && parsedName.firstName.length >= 2 && (
+                        // Caso 1: El nombre guardado es inválido
+                        hasInvalidName ||
+                        // Caso 2: El notifyName tiene apellido y el guardado no
+                        (parsedName.lastName && parsedName.lastName.length >= 2 && (!savedLastName || savedLastName.length < 2)) ||
+                        // Caso 3: El notifyName es diferente al guardado (y es válido)
+                        (parsedName.firstName.toLowerCase() !== savedFirstName.toLowerCase() && 
+                         !invalidNames.includes(parsedName.firstName.toLowerCase()))
+                    );
+                    
+                    if (shouldUpdateName) {
                         // Actualizar el nombre del cliente con el notifyName
                         try {
                             await db.query(
@@ -220,6 +245,8 @@ exports.handleWahaWebhook = async (req, res) => {
                         } catch (updateError) {
                             console.error(`   ⚠️ Error al actualizar nombre desde display: ${updateError.message}`);
                         }
+                    } else if (parsedName.firstName && parsedName.firstName.length >= 2) {
+                        console.log(`   ℹ️ Nombre del display ("${parsedName.firstName}") no se actualiza porque el nombre guardado ("${savedFirstName}") es válido y similar`);
                     }
 
                     // Usar el nombre guardado (actualizado o existente) para senderName
@@ -234,29 +261,42 @@ exports.handleWahaWebhook = async (req, res) => {
                         const firstNameToUse = parsedName.firstName || 'Cliente';
                         const lastNameToUse = parsedName.lastName || null;
                         
-                        // 🔧 Generar UUID explícitamente para evitar error de not-null constraint
-                        // Intentar usar gen_random_uuid() de PostgreSQL, si falla usar crypto.randomUUID() de Node.js
+                        // 🔧 Ahora que la BD tiene DEFAULT gen_random_uuid(), podemos omitir el id
+                        // Si el DEFAULT no funciona, generamos UUID explícitamente como fallback
                         let newClient;
                         try {
+                            // Intentar INSERT sin especificar id (usará el DEFAULT)
                             newClient = await db.query(
-                                `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                 VALUES (gen_random_uuid(), $1, 4, $2, $3, $4, $5, 'whatsapp')
+                                `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                 VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
                                  RETURNING id`,
                                 [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
                             );
-                        } catch (genUuidError) {
-                            // Si gen_random_uuid() no está disponible, usar crypto.randomUUID()
-                            if (genUuidError.message.includes('function') || genUuidError.message.includes('gen_random_uuid')) {
-                                console.log(`   ⚠️ gen_random_uuid() no disponible, usando crypto.randomUUID()`);
-                                const newClientId = crypto.randomUUID();
-                                newClient = await db.query(
-                                    `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                     VALUES ($1, $2, 4, $3, $4, $5, $6, 'whatsapp')
-                                     RETURNING id`,
-                                    [newClientId, tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                                );
+                        } catch (defaultError) {
+                            // Si el DEFAULT no funciona, generar UUID explícitamente
+                            if (defaultError.message.includes('null value') || defaultError.message.includes('id')) {
+                                console.log(`   ⚠️ DEFAULT no funcionó, generando UUID explícitamente`);
+                                try {
+                                    // Intentar usar gen_random_uuid() de PostgreSQL
+                                    newClient = await db.query(
+                                        `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                         VALUES (gen_random_uuid(), $1, 4, $2, $3, $4, $5, 'whatsapp')
+                                         RETURNING id`,
+                                        [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                                    );
+                                } catch (genUuidError) {
+                                    // Si gen_random_uuid() no está disponible, usar crypto.randomUUID()
+                                    console.log(`   ⚠️ gen_random_uuid() no disponible, usando crypto.randomUUID()`);
+                                    const newClientId = crypto.randomUUID();
+                                    newClient = await db.query(
+                                        `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                         VALUES ($1, $2, 4, $3, $4, $5, $6, 'whatsapp')
+                                         RETURNING id`,
+                                        [newClientId, tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                                    );
+                                }
                             } else {
-                                throw genUuidError;
+                                throw defaultError;
                             }
                         }
                         if (newClient.rows.length > 0) {
