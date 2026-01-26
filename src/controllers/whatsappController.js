@@ -296,43 +296,27 @@ exports.handleWahaWebhook = async (req, res) => {
                         const firstNameToUse = parsedName.firstName || 'Cliente';
                         const lastNameToUse = parsedName.lastName || null;
                         
-                        // 🔧 Ahora que la BD tiene DEFAULT gen_random_uuid(), podemos omitir el id
-                        // Si el DEFAULT no funciona, generamos UUID explícitamente como fallback
+                        // 🔧 Generar UUID explícitamente para evitar problemas con DEFAULT
+                        // Intentar usar gen_random_uuid() de PostgreSQL primero, luego crypto.randomUUID() como fallback
                         let newClient;
                         try {
-                            // Intentar INSERT sin especificar id (usará el DEFAULT)
+                            // Intentar usar gen_random_uuid() de PostgreSQL
                             newClient = await db.query(
-                                `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                 VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
+                                `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                 VALUES (gen_random_uuid(), $1, 4, $2, $3, $4, $5, 'whatsapp')
                                  RETURNING id`,
                                 [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
                             );
-                        } catch (defaultError) {
-                            // Si el DEFAULT no funciona, generar UUID explícitamente
-                            if (defaultError.message.includes('null value') || defaultError.message.includes('id')) {
-                                console.log(`   ⚠️ DEFAULT no funcionó, generando UUID explícitamente`);
-                                try {
-                                    // Intentar usar gen_random_uuid() de PostgreSQL
-                                    newClient = await db.query(
-                                        `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                         VALUES (gen_random_uuid(), $1, 4, $2, $3, $4, $5, 'whatsapp')
-                                         RETURNING id`,
-                                        [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                                    );
-                                } catch (genUuidError) {
-                                    // Si gen_random_uuid() no está disponible, usar crypto.randomUUID()
-                                    console.log(`   ⚠️ gen_random_uuid() no disponible, usando crypto.randomUUID()`);
-                                    const newClientId = crypto.randomUUID();
-                                    newClient = await db.query(
-                                        `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                         VALUES ($1, $2, 4, $3, $4, $5, $6, 'whatsapp')
-                                         RETURNING id`,
-                                        [newClientId, tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                                    );
-                                }
-                            } else {
-                                throw defaultError;
-                            }
+                        } catch (genUuidError) {
+                            // Si gen_random_uuid() no está disponible, usar crypto.randomUUID()
+                            console.log(`   ⚠️ gen_random_uuid() no disponible, usando crypto.randomUUID()`);
+                            const newClientId = crypto.randomUUID();
+                            newClient = await db.query(
+                                `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                                 VALUES ($1, $2, 4, $3, $4, $5, $6, 'whatsapp')
+                                 RETURNING id`,
+                                [newClientId, tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                            );
                         }
                         if (newClient.rows.length > 0) {
                             clientId = newClient.rows[0].id;
