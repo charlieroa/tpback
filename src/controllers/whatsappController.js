@@ -292,14 +292,17 @@ exports.handleWahaWebhook = async (req, res) => {
                     // Usar el nombre guardado (actualizado o existente) para senderName
                     if (savedFirstName && savedFirstName.length >= 2 && !/^\d+$/.test(savedFirstName) && !invalidNames.includes(savedFirstName.toLowerCase())) {
                         senderName = savedLastName && savedLastName.length >= 2 ? `${savedFirstName} ${savedLastName}`.trim() : savedFirstName;
+                        hasNameInDB = true; // ✅ Tiene nombre válido en BD
                     } else if (parsedName.firstName && parsedName.firstName.length >= 2) {
                         // Si el nombre guardado no es válido pero tenemos un display name válido, usarlo
                         senderName = parsedName.lastName && parsedName.lastName.length >= 2 
                             ? `${parsedName.firstName} ${parsedName.lastName}`.trim() 
                             : parsedName.firstName;
                         console.log(`   ℹ️ Usando display name para senderName: "${senderName}"`);
+                        // No establecer hasNameInDB = true aquí porque el nombre no está en BD, solo en display
+                        // El bot debería preguntar el nombre si no está en BD
                     }
-                    console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber})`);
+                    console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber}, tieneNombreEnBD: ${hasNameInDB})`);
                 } else {
                     // Intentar crear nuevo cliente con mejor manejo de errores
                     try {
