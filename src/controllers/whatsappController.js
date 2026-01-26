@@ -204,6 +204,7 @@ exports.handleWahaWebhook = async (req, res) => {
             // Gestión de cliente
             let clientId = null;
             let senderName = notifyName || 'Cliente';
+            let hasNameInDB = false; // 🔧 Flag para saber si el usuario tiene nombre guardado en BD
             const parsedName = parseFullName(notifyName);
             
             console.log(`   📋 Nombre de display recibido: "${notifyName}" ${notifyName ? '(válido)' : '(vacío - usando "Cliente")'}`);
@@ -347,7 +348,6 @@ exports.handleWahaWebhook = async (req, res) => {
                         if (newClient.rows.length > 0) {
                             clientId = newClient.rows[0].id;
                             senderName = lastNameToUse ? `${firstNameToUse} ${lastNameToUse}` : firstNameToUse;
-                            console.log(`   🆕 Nuevo cliente creado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber})`);
                             
                             // Si el nombre es "Cliente" pero tenemos un display name válido, intentar actualizarlo
                             if (firstNameToUse === 'Cliente' && parsedName.firstName && parsedName.firstName.length >= 2) {
@@ -360,11 +360,16 @@ exports.handleWahaWebhook = async (req, res) => {
                                     senderName = parsedName.lastName && parsedName.lastName.length >= 2 
                                         ? `${parsedName.firstName} ${parsedName.lastName}`.trim() 
                                         : parsedName.firstName;
+                                    hasNameInDB = true; // ✅ Ahora tiene nombre válido
                                     console.log(`   ✅ Nombre actualizado a: ${senderName}`);
                                 } catch (updateError) {
                                     console.error(`   ⚠️ Error al actualizar nombre: ${updateError.message}`);
                                 }
+                            } else if (firstNameToUse !== 'Cliente') {
+                                hasNameInDB = true; // ✅ Tiene nombre válido desde el inicio
                             }
+                            
+                            console.log(`   🆕 Nuevo cliente creado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber}, tieneNombreEnBD: ${hasNameInDB})`);
                         }
                     } catch (insertError) {
                         // Si falla por duplicado (puede haber un race condition), intentar buscar de nuevo
@@ -400,7 +405,11 @@ exports.handleWahaWebhook = async (req, res) => {
             // Validar que tenemos clientId antes de continuar
             if (!clientId) {
                 console.error(`   ⚠️ ADVERTENCIA: No se pudo obtener/crear clientId para ${phoneNumber}`);
+                hasNameInDB = false; // Sin clientId, no puede tener nombre válido
             }
+            
+            // 🔧 Log final del estado del nombre
+            console.log(`   📊 Estado final: senderName="${senderName}", hasNameInDB=${hasNameInDB}, clientId=${clientId ? 'existe' : 'null'}`);
 
             // 🔧 Detectar si el mensaje contiene un nombre completo (para actualizar el cliente)
             // Esto se maneja ahora arriba cuando se detecta que no tiene nombre válido
@@ -509,20 +518,25 @@ exports.handleWahaWebhook = async (req, res) => {
             const resetCommands = /(empezar de nuevo|cancelar|reset|reiniciar|nueva cita|otro servicio)/i;
 
             // 🔧 NUEVO: Detectar si el usuario no tiene nombre y necesita proporcionarlo
-            const hasInvalidName = !senderName || 
+            // Usar hasNameInDB para verificar si realmente tiene nombre guardado en BD
+            // También verificar que senderName no sea un nombre inválido
+            const invalidNameValues = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
+            const hasInvalidName = clientId && !hasNameInDB && (
+                                  !senderName || 
                                   senderName === 'Cliente' || 
                                   senderName.length < 2 || 
                                   /^\d+$/.test(senderName) ||
-                                  ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'].includes(senderName.toLowerCase());
+                                  invalidNameValues.includes(senderName.toLowerCase())
+                              );
             
-            // Si no tiene nombre válido y envía un saludo, preguntarle su nombre
-            if (hasInvalidName && simpleGreetings.test(userMessage.trim()) && conversationHistory.length === 0) {
-                console.log(`   👤 Usuario sin nombre detectado, preguntando nombre...`);
-                await wahaService.sendMessage(tenantId, chatId, '¡Hola! 👋 Para poder ayudarte mejor, ¿podrías decirme tu nombre completo?');
-                return res.status(200).send('OK');
-            }
-
-            // Si no tiene nombre válido y el mensaje parece ser un nombre (2+ palabras), guardarlo
+            // 🔧 DEBUG: Verificar si es un saludo simple
+            const isSimpleGreeting = simpleGreetings.test(userMessage.trim());
+            const hasNoHistory = conversationHistory.length === 0;
+            
+            console.log(`   👤 Validación de nombre: senderName="${senderName}", hasNameInDB=${hasNameInDB}, clientId=${clientId ? 'existe' : 'null'}, hasInvalidName=${hasInvalidName}`);
+            console.log(`   🔍 Condiciones: isSimpleGreeting=${isSimpleGreeting}, hasNoHistory=${hasNoHistory}`);
+            
+            // Si no tiene nombre válido y el mensaje parece ser un nombre (2+ palabras), guardarlo PRIMERO
             if (hasInvalidName && clientId) {
                 const namePattern = /^([A-Za-zÁÉÍÓÚáéíóúÑñ]{2,})\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]{2,})$/;
                 const potentialName = userMessage.trim();
@@ -542,12 +556,28 @@ exports.handleWahaWebhook = async (req, res) => {
                             );
                             console.log(`   ✅ Nombre del cliente guardado: ${firstName} ${lastName}`);
                             senderName = `${firstName} ${lastName}`;
+                            hasNameInDB = true; // ✅ Ahora tiene nombre válido
                             // Continuar con el flujo normal después de guardar el nombre
                         } catch (updateError) {
                             console.error(`   ⚠️ Error al guardar nombre: ${updateError.message}`);
                         }
                     }
                 }
+            }
+            
+            // Si no tiene nombre válido y envía un saludo, preguntarle su nombre ANTES de procesar con IA
+            // 🔧 IMPORTANTE: Verificar ANTES de cualquier procesamiento con IA
+            if (hasInvalidName && isSimpleGreeting && hasNoHistory) {
+                console.log(`   👤 Usuario sin nombre detectado (senderName="${senderName}", hasNameInDB=${hasNameInDB}), preguntando nombre...`);
+                await wahaService.sendMessage(tenantId, chatId, '¡Hola! 👋 Para poder ayudarte mejor, ¿podrías decirme tu nombre completo?');
+                return res.status(200).send('OK');
+            }
+            
+            // Si no tiene clientId, también preguntar el nombre (aunque esto no debería pasar normalmente)
+            if (!clientId && isSimpleGreeting && hasNoHistory) {
+                console.log(`   ⚠️ Usuario sin clientId, preguntando nombre...`);
+                await wahaService.sendMessage(tenantId, chatId, '¡Hola! 👋 Para poder ayudarte mejor, ¿podrías decirme tu nombre completo?');
+                return res.status(200).send('OK');
             }
 
             if ((simpleGreetings.test(userMessage.trim()) || resetCommands.test(userMessage.trim())) && conversationHistory.length > 0) {
