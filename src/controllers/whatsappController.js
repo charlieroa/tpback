@@ -737,9 +737,13 @@ PASO 3: VERIFICAR DISPONIBILIDAD
 - Usar fecha del contexto si existe
 - Llamar con: serviceId + stylistName + date (del contexto o nueva)
 - RESPUESTA DIRECTA: No digas "Voy a verificar" o "Un momento". Di directamente el resultado:
-  * Si el salón está cerrado ese día (salonClosed: true): Usa el mensaje exacto del resultado que incluye el siguiente día disponible. Ejemplo: "Lo siento mucho, el establecimiento no tiene servicio el [fecha]. Pero puedo ofrecerte desde el [siguiente día disponible]. ¿Te parece bien?"
+  * ⚠️ CRÍTICO - Si el salón está cerrado ese día (salonClosed: true): Responde claramente "NO" o "No podemos agendar". Usa el mensaje exacto del resultado. Ejemplos:
+    - "No, lo siento. El establecimiento no tiene servicio el [fecha]. Pero puedo ofrecerte desde el [siguiente día disponible]. ¿Te parece bien?"
+    - "No, el salón está cerrado ese día. ¿Te gustaría probar con otra fecha?"
+    - SIEMPRE empieza con "No" o "Lo siento, no" cuando el salón está cerrado
+  * ⚠️ CRÍTICO - Si la hora está fuera del horario laboral: Responde "No, esa hora está fuera de nuestro horario de atención. Horarios disponibles: [lista]"
   * Si está disponible: "[Nombre] tiene disponible [fecha] en estos horarios: [lista]"
-  * Si NO está disponible: "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
+  * Si NO está disponible (estilista ocupado): "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
   * Si no encuentra estilista: "No encontré [nombre]. Disponibles: [lista]"
 - ⚠️ IMPORTANTE: Usa el formato de 12 horas (AM/PM) para mostrar horarios. Si el resultado tiene "slots_12h", úsalo. Ejemplo: "9:00 AM", "2:00 PM", "12:00 PM"
 - 🆕 CRÍTICO: Si muestras horarios en una lista numerada (1, 2, 3...) y el usuario responde con un número (ej: "1", "uno", "la 1", "2 esta bien"), debes entender que se refiere a la opción de esa lista, NO a la hora. 
@@ -1052,8 +1056,14 @@ REGLA DE ORO:
             }
 
             // 🆕 Si el salón está cerrado y hay un siguiente día disponible, sugerirlo
-            if (functionResult.salonClosed && functionResult.nextAvailableDay) {
-                console.log(`   ⚠️ Salón cerrado ese día. Siguiente día disponible: ${functionResult.nextAvailableDay}`);
+            if (functionResult.salonClosed) {
+                console.log(`   ⚠️ Salón cerrado ese día`);
+                if (functionResult.nextAvailableDay) {
+                    console.log(`   📅 Siguiente día disponible: ${functionResult.nextAvailableDay}`);
+                }
+                // Marcar explícitamente que NO se puede agendar
+                functionResult.can_book = false;
+                functionResult.reason = 'salon_closed';
                 // No actualizamos el contexto automáticamente, pero el mensaje ya incluye la sugerencia
             }
         }

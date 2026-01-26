@@ -14,6 +14,7 @@ const {
     convert24to12,
     getDayRangesFromWorkingHours,
     findNextAvailableDay,
+    isWithinRanges,
 } = require('../utils/appointmentHelpers');
 
 const {
@@ -471,13 +472,13 @@ exports.checkAvailability = async (req, res) => {
                     salonClosed: true,
                     nextAvailableDay: nextAvailableDay.date,
                     nextAvailableDayReadable: nextAvailableDay.readableDate,
-                    message: `Lo siento mucho, el establecimiento no tiene servicio el ${date}. Pero puedo ofrecerte desde el ${nextAvailableDay.readableDate}. ¿Te parece bien?`
+                    message: `No, lo siento. El establecimiento está cerrado ese día. Pero puedo ofrecerte desde el ${nextAvailableDay.readableDate}. ¿Te parece bien?`
                 });
             } else {
                 return res.status(200).json({
                     available: false,
                     salonClosed: true,
-                    message: `Lo siento mucho, el establecimiento no tiene servicio el ${date}. ¿Te gustaría probar con otra fecha?`
+                    message: `No, lo siento. El establecimiento está cerrado ese día. ¿Te gustaría probar con otra fecha?`
                 });
             }
         }
@@ -633,8 +634,8 @@ exports.checkAvailability = async (req, res) => {
                     available: false,
                     stylist: { id: finalStylistId, name: stylistNameFull },
                     message: isPastDay
-                        ? `Todos los horarios de hoy ya pasaron. ¿Qué tal mañana?`
-                        : `${stylistNameFull} no tiene disponibilidad el ${date}. ¿Quieres probar otra fecha?`,
+                        ? `No, todos los horarios de hoy ya pasaron. ¿Qué tal mañana?`
+                        : `No, ${stylistNameFull} no tiene disponibilidad el ${date}. ¿Quieres probar otra fecha?`,
                     slots: []
                 });
             }
@@ -648,17 +649,32 @@ exports.checkAvailability = async (req, res) => {
 
                 console.log(`   ${isAvailable ? '✅' : '❌'} Hora ${time}: ${isAvailable ? 'disponible' : 'NO disponible'}`);
 
+                // 🔧 Verificar si la hora está fuera del horario laboral del salón
+                const requestedTime = makeLocalUtc(date, time);
+                const requestedEnd = new Date(requestedTime.getTime() + duration * 60000);
+                const isWithinWorkingHours = isWithinRanges(date, tenantDayRanges, requestedTime, requestedEnd);
+                
+                let message;
+                if (!isWithinWorkingHours) {
+                    // La hora está fuera del horario laboral
+                    message = `No, esa hora está fuera de nuestro horario de atención. Horarios disponibles: ${availableSlots12h.slice(0, 6).join(', ')}. ¿Cuál prefieres?`;
+                } else if (!isAvailable) {
+                    // El estilista está ocupado a esa hora
+                    message = `No, ${stylistNameFull} no está disponible el ${date} a las ${time12h}. Horarios disponibles: ${availableSlots12h.slice(0, 6).join(', ')}. ¿Cuál prefieres?`;
+                } else {
+                    // Disponible
+                    message = `${stylistNameFull} está disponible el ${date} a las ${time12h}. ¿Confirmo tu cita?`;
+                }
+                
                 return res.status(200).json({
-                    available: isAvailable,
+                    available: isAvailable && isWithinWorkingHours,
                     stylist: { id: finalStylistId, name: stylistNameFull },
                     service: { id: serviceId, name: serviceName, duration_minutes: duration },
                     date,
                     time: time.slice(0, 5),
                     slots: isAvailable ? [time.slice(0, 5)] : availableSlots.slice(0, 10),
                     slots_12h: isAvailable ? [time12h] : availableSlots12h.slice(0, 10), // 🆕 Formato 12h
-                    message: isAvailable
-                        ? `${stylistNameFull} está disponible el ${date} a las ${time12h}. ¿Confirmo tu cita?`
-                        : `${stylistNameFull} no está disponible el ${date} a las ${time12h}. Horarios disponibles: ${availableSlots12h.slice(0, 6).join(', ')}. ¿Cuál prefieres?`
+                    message: message
                 });
             }
 
