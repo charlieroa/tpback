@@ -1,11 +1,12 @@
-// Script para eliminar usuario por número de teléfono
+// Script para eliminar usuario por nombre
 // Uso: node migrations/delete_phone_user.js
 
 require('dotenv').config();
 const db = require('../src/config/db');
 
-// Número de teléfono a buscar (sin espacios)
-const PHONE_NUMBER = '3044180748';
+// Nombre a buscar
+const FIRST_NAME = 'Fredy';
+const LAST_NAME = 'Castellanos';
 
 async function deleteUserByPhone() {
     const client = await db.getClient();
@@ -13,10 +14,10 @@ async function deleteUserByPhone() {
     try {
         await client.query('BEGIN');
         
-        console.log('🔍 Buscando usuario con teléfono:', PHONE_NUMBER);
-        console.log('   (También buscará: 304 4180748, +573044180748, etc.)\n');
+        console.log('🔍 Buscando usuario:', `${FIRST_NAME} ${LAST_NAME}`);
+        console.log('   (Buscará variaciones del nombre)\n');
         
-        // 1. Buscar el usuario con diferentes variaciones del número
+        // 1. Buscar el usuario por nombre (case-insensitive, con variaciones)
         const findUser = await client.query(`
             SELECT 
                 id,
@@ -28,25 +29,24 @@ async function deleteUserByPhone() {
                 role_id,
                 created_at
             FROM users
-            WHERE phone = $1
-               OR phone = $2
-               OR phone = $3
-               OR phone = $4
-               OR phone LIKE $5
-               OR phone LIKE $6
+            WHERE (
+                (LOWER(first_name) = LOWER($1) AND LOWER(last_name) = LOWER($2))
+                OR (LOWER(first_name) = LOWER($1) AND (last_name IS NULL OR last_name = ''))
+                OR (LOWER(first_name) LIKE LOWER($3) AND LOWER(last_name) LIKE LOWER($4))
+                OR (LOWER(first_name || ' ' || COALESCE(last_name, '')) LIKE LOWER($5))
+            )
             ORDER BY created_at DESC
         `, [
-            PHONE_NUMBER,                                    // 3044180748
-            PHONE_NUMBER.replace(/(\d{3})(\d{7})/, '$1 $2'), // 304 4180748
-            `+57${PHONE_NUMBER}`,                            // +573044180748
-            `+${PHONE_NUMBER}`,                              // +3044180748
-            `%${PHONE_NUMBER}%`,                             // Contiene el número
-            `%${PHONE_NUMBER.slice(-10)}%`                    // Últimos 10 dígitos
+            FIRST_NAME,                                    // Fredy
+            LAST_NAME,                                     // Castellanos
+            `%${FIRST_NAME}%`,                             // Contiene Fredy
+            `%${LAST_NAME}%`,                              // Contiene Castellanos
+            `%${FIRST_NAME}%${LAST_NAME}%`                 // Contiene ambos
         ]);
         
         if (findUser.rows.length === 0) {
-            console.log('ℹ️  No se encontró ningún usuario con ese número de teléfono.');
-            console.log('💡 Verifica que el número esté correcto o que el formato en la BD sea diferente.');
+            console.log('ℹ️  No se encontró ningún usuario con ese nombre.');
+            console.log('💡 Verifica que el nombre esté correcto o que esté escrito de forma diferente en la BD.');
             await client.query('COMMIT');
             return;
         }
@@ -112,6 +112,7 @@ async function deleteUserByPhone() {
         });
         
         console.log('\n✅ Proceso completado. El usuario será recreado automáticamente con el display name correcto cuando envíe un mensaje.');
+        console.log(`\n📱 Teléfono(s) eliminado(s): ${deleteUsers.rows.map(u => u.phone).join(', ')}`);
         
     } catch (error) {
         await client.query('ROLLBACK');
