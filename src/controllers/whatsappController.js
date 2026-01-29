@@ -5,9 +5,8 @@ const wahaService = require('../services/wahaService');
 const { formatInTimeZone } = require('date-fns-tz');
 const { getIO } = require('../socket');
 const { normalizeDateKeyword, normalizeHumanTimeToHHMM } = require('../utils/appointmentHelpers');
-const crypto = require('crypto');
 
-console.log('🚀 [DEBUG] whatsappController.js cargado v12 (FECHA OBLIGATORIA ANTES DE ESTILISTA)');
+console.log('🚀 [DEBUG] whatsappController.js cargado v13 (FIX: UUID auto-generado por PostgreSQL)');
 
 const TIME_ZONE = 'America/Bogota';
 
@@ -290,34 +289,18 @@ exports.handleWahaWebhook = async (req, res) => {
                     }
                     console.log(`   ✅ Cliente existente identificado: ${senderName} (ID: ${clientId}, teléfono: ${phoneNumber}, tieneNombreEnBD: ${hasNameInDB})`);
                 } else {
-                    // Intentar crear nuevo cliente con mejor manejo de errores
+                    // ✅ SOLUCIÓN: Omitir el campo id y dejar que PostgreSQL lo genere automáticamente
                     try {
-                        // Usar el nombre parseado si es válido, sino usar "Cliente"
                         const firstNameToUse = parsedName.firstName || 'Cliente';
                         const lastNameToUse = parsedName.lastName || null;
                         
-                        // 🔧 Generar UUID explícitamente para evitar problemas con DEFAULT
-                        // Intentar usar gen_random_uuid() de PostgreSQL primero, luego crypto.randomUUID() como fallback
-                        let newClient;
-                        try {
-                            // Intentar usar gen_random_uuid() de PostgreSQL
-                            newClient = await db.query(
-                                `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                 VALUES (gen_random_uuid(), $1, 4, $2, $3, $4, $5, 'whatsapp')
-                                 RETURNING id`,
-                                [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                            );
-                        } catch (genUuidError) {
-                            // Si gen_random_uuid() no está disponible, usar crypto.randomUUID()
-                            console.log(`   ⚠️ gen_random_uuid() no disponible, usando crypto.randomUUID()`);
-                            const newClientId = crypto.randomUUID();
-                            newClient = await db.query(
-                                `INSERT INTO users (id, tenant_id, role_id, first_name, last_name, phone, email, password_hash)
-                                 VALUES ($1, $2, 4, $3, $4, $5, $6, 'whatsapp')
-                                 RETURNING id`,
-                                [newClientId, tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
-                            );
-                        }
+                        const newClient = await db.query(
+                            `INSERT INTO users (tenant_id, role_id, first_name, last_name, phone, email, password_hash)
+                             VALUES ($1, 4, $2, $3, $4, $5, 'whatsapp')
+                             RETURNING id`,
+                            [tenantId, firstNameToUse, lastNameToUse, phoneNumber, `${phoneNumber}@whatsapp.temp`]
+                        );
+                        
                         if (newClient.rows.length > 0) {
                             clientId = newClient.rows[0].id;
                             senderName = lastNameToUse ? `${firstNameToUse} ${lastNameToUse}` : firstNameToUse;
@@ -383,9 +366,6 @@ exports.handleWahaWebhook = async (req, res) => {
             
             // 🔧 Log final del estado del nombre
             console.log(`   📊 Estado final: senderName="${senderName}", hasNameInDB=${hasNameInDB}, clientId=${clientId ? 'existe' : 'null'}`);
-
-            // 🔧 Detectar si el mensaje contiene un nombre completo (para actualizar el cliente)
-            // Esto se maneja ahora arriba cuando se detecta que no tiene nombre válido
 
             // Manejar notas de voz
             if (messageType === 'ptt' || messageType === 'audio') {
@@ -491,8 +471,6 @@ exports.handleWahaWebhook = async (req, res) => {
             const resetCommands = /(empezar de nuevo|cancelar|reset|reiniciar|nueva cita|otro servicio)/i;
 
             // 🔧 NUEVO: Detectar si el usuario no tiene nombre y necesita proporcionarlo
-            // Usar hasNameInDB para verificar si realmente tiene nombre guardado en BD
-            // También verificar que senderName no sea un nombre inválido
             const invalidNameValues = ['cliente', 'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hi', 'hello'];
             const hasInvalidName = clientId && !hasNameInDB && (
                                   !senderName || 
@@ -530,7 +508,6 @@ exports.handleWahaWebhook = async (req, res) => {
                             console.log(`   ✅ Nombre del cliente guardado: ${firstName} ${lastName}`);
                             senderName = `${firstName} ${lastName}`;
                             hasNameInDB = true; // ✅ Ahora tiene nombre válido
-                            // Continuar con el flujo normal después de guardar el nombre
                         } catch (updateError) {
                             console.error(`   ⚠️ Error al guardar nombre: ${updateError.message}`);
                         }
@@ -539,14 +516,13 @@ exports.handleWahaWebhook = async (req, res) => {
             }
             
             // Si no tiene nombre válido y envía un saludo, preguntarle su nombre ANTES de procesar con IA
-            // 🔧 IMPORTANTE: Verificar ANTES de cualquier procesamiento con IA
             if (hasInvalidName && isSimpleGreeting && hasNoHistory) {
                 console.log(`   👤 Usuario sin nombre detectado (senderName="${senderName}", hasNameInDB=${hasNameInDB}), preguntando nombre...`);
                 await wahaService.sendMessage(tenantId, chatId, '¡Hola! 👋 Para poder ayudarte mejor, ¿podrías decirme tu nombre completo?');
                 return res.status(200).send('OK');
             }
             
-            // Si no tiene clientId, también preguntar el nombre (aunque esto no debería pasar normalmente)
+            // Si no tiene clientId, también preguntar el nombre
             if (!clientId && isSimpleGreeting && hasNoHistory) {
                 console.log(`   ⚠️ Usuario sin clientId, preguntando nombre...`);
                 await wahaService.sendMessage(tenantId, chatId, '¡Hola! 👋 Para poder ayudarte mejor, ¿podrías decirme tu nombre completo?');
@@ -565,11 +541,10 @@ exports.handleWahaWebhook = async (req, res) => {
             const extractedDateTime = extractDateTimeFromMessage(userMessage);
 
             let contextUpdated = false;
-            let shouldAutoCheck = false; // 🆕 Flag para verificar automáticamente
+            let shouldAutoCheck = false;
 
-            // 🆕 DETECTAR NOMBRES DE ESTILISTAS MENCIONADOS (si hay servicio en contexto)
+            // 🆕 DETECTAR NOMBRES DE ESTILISTAS MENCIONADOS
             if (bookingContext.service_id && !bookingContext.stylist_id) {
-                // Patrones comunes de nombres de estilistas mencionados
                 const stylistNames = ['pedro', 'carlos', 'sofia', 'sofía', 'maria', 'maría', 'juan', 'ana', 'laura'];
                 const userMessageLower = userMessage.toLowerCase().trim();
                 
@@ -588,20 +563,18 @@ exports.handleWahaWebhook = async (req, res) => {
                 }
             }
 
-            let shouldShowStylists = false; // 🆕 Flag para mostrar estilistas automáticamente
+            let shouldShowStylists = false;
             
             if (extractedDateTime.date && !bookingContext.date) {
                 bookingContext.date = extractedDateTime.date;
                 contextUpdated = true;
                 console.log(`   ✅ Fecha guardada en contexto: ${extractedDateTime.date}`);
                 
-                // 🆕 Si ya tenemos servicio + estilista, podemos verificar automáticamente
                 if (bookingContext.service_id && bookingContext.stylist) {
                     shouldAutoCheck = true;
                     console.log(`   🎯 Tiene servicio + estilista + fecha → Puede verificar automáticamente`);
                 }
                 
-                // 🆕 Si tenemos servicio pero NO estilista, mostrar estilistas automáticamente
                 if (bookingContext.service_id && !bookingContext.stylist) {
                     shouldShowStylists = true;
                     console.log(`   🎯 Tiene servicio + fecha (sin estilista) → Debe mostrar estilistas automáticamente`);
@@ -617,13 +590,11 @@ exports.handleWahaWebhook = async (req, res) => {
                 bookingContextCache.set(cacheKey, bookingContext);
             }
 
-            // 🆕 Si se acaba de completar la información necesaria, incluir hint para GPT
             if (shouldAutoCheck) {
                 console.log(`   💡 Hint para GPT: Ya tiene servicio + estilista + fecha → Debe verificar disponibilidad`);
             }
 
             try {
-                // 🆕 Si acabamos de completar la información, añadir hint al mensaje
                 let messageToProcess = userMessage;
                 if (shouldAutoCheck) {
                     messageToProcess = `${userMessage}\n\n[NOTA: Ya tienes servicio + estilista + fecha en el contexto. Verifica disponibilidad automáticamente.]`;
@@ -743,7 +714,6 @@ exports.handleWahaWebhook = async (req, res) => {
 async function processWithAI(apiKey, tenantId, clientId, userMessage, conversationHistory, bookingContext, senderName, tenantName, extractedDateTime = { date: null, time: null }) {
     const hoyStr = formatInTimeZone(new Date(), TIME_ZONE, "EEEE d 'de' MMMM 'de' yyyy", { locale: require('date-fns/locale/es') });
 
-    // Contexto actual CON IDs
     let contextInfo = '';
     if (Object.keys(bookingContext).length > 0) {
         const parts = [];
@@ -758,7 +728,6 @@ async function processWithAI(apiKey, tenantId, clientId, userMessage, conversati
         }
     }
 
-    // 🆕 System Prompt MEJORADO - FLUJO ORDENADO
     const SYSTEM_PROMPT = `Eres el asistente de "${tenantName}" en WhatsApp. Cliente: ${senderName}.
 Hoy: ${hoyStr}.${contextInfo}
 
@@ -784,7 +753,7 @@ PASO 1: BUSCAR SERVICIO PRIMERO - ⚠️ OBLIGATORIO
 - NO respondas sin llamar la función. SIEMPRE llama buscar_servicio cuando alguien pide un servicio.
 - Si hay múltiples servicios → mostrar opciones y pedir confirmación
 - Si hay un solo servicio → guardar service_id y mostrar estilistas
-- ⚠️ CRÍTICO: Si el resultado tiene "stylists" con una lista, SOLO muestra esos estilistas. NO inventes estilistas. Si hay un "hint" que dice los nombres, usa SOLO esos nombres.
+- ⚠️ CRÍTICO: Si el resultado tiene "stylists" con una lista, SOLO muestra esos estilistas. NO inventes estilistas.
 
 🆕 CASO ESPECIAL - Usuario dice TODO de una vez (servicio + estilista + fecha + hora):
 - Usuario dice: "Quiero una cita para mañana 9:30 am para corte con carlos roa"
@@ -817,107 +786,17 @@ PASO 3: VERIFICAR DISPONIBILIDAD
 - Usar fecha del contexto si existe
 - Llamar con: serviceId + stylistName + date (del contexto o nueva)
 - RESPUESTA DIRECTA: No digas "Voy a verificar" o "Un momento". Di directamente el resultado:
-  * ⚠️ CRÍTICO - Si el salón está cerrado ese día (salonClosed: true): Responde claramente "NO" o "No podemos agendar". Usa el mensaje exacto del resultado. Ejemplos:
-    - "No, lo siento. El establecimiento no tiene servicio el [fecha]. Pero puedo ofrecerte desde el [siguiente día disponible]. ¿Te parece bien?"
-    - "No, el salón está cerrado ese día. ¿Te gustaría probar con otra fecha?"
-    - SIEMPRE empieza con "No" o "Lo siento, no" cuando el salón está cerrado
+  * ⚠️ CRÍTICO - Si el salón está cerrado ese día (salonClosed: true): Responde claramente "NO" o "No podemos agendar". Usa el mensaje exacto del resultado.
   * ⚠️ CRÍTICO - Si la hora está fuera del horario laboral: Responde "No, esa hora está fuera de nuestro horario de atención. Horarios disponibles: [lista]"
   * Si está disponible: "[Nombre] tiene disponible [fecha] en estos horarios: [lista]"
   * Si NO está disponible (estilista ocupado): "[Nombre] no está disponible [fecha] a las [hora]. Horarios disponibles: [lista]"
   * Si no encuentra estilista: "No encontré [nombre]. Disponibles: [lista]"
-- ⚠️ IMPORTANTE: Usa el formato de 12 horas (AM/PM) para mostrar horarios. Si el resultado tiene "slots_12h", úsalo. Ejemplo: "9:00 AM", "2:00 PM", "12:00 PM"
-- 🆕 CRÍTICO: Si muestras horarios en una lista numerada (1, 2, 3...) y el usuario responde con un número (ej: "1", "uno", "la 1", "2 esta bien"), debes entender que se refiere a la opción de esa lista, NO a la hora. 
-  * ⚠️ SIEMPRE usa "slots_map" del resultado de verificar_disponibilidad para mapear el número a la hora correcta.
-  * Ejemplo: Si el usuario dice "2" y slots_map[2] = {time_12h: "12:15 PM", time_24h: "12:15"}, DEBES usar time_24h ("12:15") para verificar_disponibilidad o agendar_cita.
-  * Ejemplo: Si mostraste "1. 12:00 PM, 2. 12:15 PM" y el usuario dice "2", significa 12:15 PM (NO 1:00 PM, NO 2:00 PM, NO 12:00 PM).
-  * ⚠️ REGLA DE ORO: Si el resultado anterior tiene slots_map, SIEMPRE consulta slots_map[numero] para obtener la hora correcta.
-- 🆕 MUESTRA TODOS LOS HORARIOS: Si el resultado tiene "slots_12h" con múltiples horarios, muestra TODOS en una lista numerada. NO limites a solo 10. Si hay muchos (más de 20), puedes agruparlos por rangos (ej: "9:00 AM - 12:00 PM, 2:00 PM - 6:00 PM") o mostrar todos en lista.
+- ⚠️ IMPORTANTE: Usa el formato de 12 horas (AM/PM) para mostrar horarios. Si el resultado tiene "slots_12h", úsalo.
+- 🆕 MUESTRA TODOS LOS HORARIOS: Si el resultado tiene "slots_12h" con múltiples horarios, muestra TODOS en una lista numerada.
 
 PASO 4: CONFIRMAR Y AGENDAR
 - Usuario elige hora → confirmar
-  * ⚠️ CRÍTICO - Si elige por número de lista (ej: "1", "2", "dos" después de ver lista numerada):
-    → SIEMPRE usar slots_map del resultado anterior para mapear el número a la hora
-    → Ejemplo: Si dice "2" y slots_map[2] = {time_24h: "12:15"}, usa time="12:15" (NO "12:00" ni "02:00")
-    → PRIMERO llamar verificar_disponibilidad con la hora correcta del slots_map
-    → Luego confirmar: "¿Confirmo tu cita para [fecha] a las [time_12h del slots_map]?"
-  * Si dice la hora directamente (ej: "12:00 PM" o "12:15 PM") → usar esa hora
 - Usuario dice "sí" o confirma → agendar_cita con la hora correcta
-
-═══════════════════════════════════════════════════════════════
-EJEMPLOS CORRECTOS:
-═══════════════════════════════════════════════════════════════
-
-EJEMPLO 1 - Usuario pide servicio genérico:
-Usuario: "quiero un servicio para mañana"
-→ Contexto guarda: 📅 Fecha: 2026-01-21
-→ [buscar_servicio: service="servicio"] OBLIGATORIO
-→ Mostrar todos los servicios disponibles
-
-EJEMPLO 2 - Fecha ya mencionada, usuario elige estilista:
-Contexto: 📅 Fecha: 2026-01-21 (mañana), 📋 Servicio: Corte Caballero
-Usuario: "sofia"
-→ YA HAY FECHA en contexto → LLAMAR verificar_disponibilidad AUTOMÁTICAMENTE
-→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21"]
-→ RESPUESTA DIRECTA: "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00, 14:00, 15:00. ¿Cuál prefieres?"
-→ NO digas: "¿Para qué fecha?" (ya la tiene), NO digas "Voy a verificar"
-
-EJEMPLO 3A - Usuario menciona fecha después de elegir servicio (SIN estilista):
-Contexto: 📋 Servicio: Corte Caballero (sin fecha, sin estilista)
-Usuario: "para el viernes" o "para mañana"
-→ Se guarda fecha: 📅 2026-01-23
-→ AUTOMÁTICAMENTE: [buscar_servicio: service="Corte Caballero"] (usar service_id del contexto si es posible)
-→ Mostrar DIRECTAMENTE: "Estos estilistas ofrecen Corte Caballero: 1. Pedro, 2. Carlos, 3. Sofía. ¿Con cuál?"
-→ NO digas: "He guardado la fecha" ni "Un momento, por favor"
-
-EJEMPLO 3B - Usuario menciona fecha después de elegir estilista:
-Contexto: 📋 Servicio: Corte Caballero, 💇 Estilista: Sofía (sin fecha)
-Usuario: "para mañana"
-→ Se guarda fecha: 📅 2026-01-21
-→ AUTOMÁTICAMENTE: [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21"]
-→ "Sofía tiene disponible mañana en estos horarios: 9:00, 10:00, 14:00. ¿Cuál prefieres?"
-
-EJEMPLO 4 - Usuario menciona hora:
-Contexto: 📅 Fecha: 2026-01-21, 📋 Servicio: Corte Caballero, 💇 Estilista: Sofía
-Usuario: "a las 9" o "9" o "tipo 9"
-→ [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="09:00"]
-→ Si disponible: "Sí, Sofía está disponible mañana a las 9:00. ¿Confirmo tu cita?"
-→ Si NO disponible: "Sofía no está disponible mañana a las 9:00. Horarios disponibles: 10:00, 11:00, 14:00. ¿Cuál prefieres?"
-
-EJEMPLO 5 - Usuario elige horario por número de lista:
-Contexto: Acabas de mostrar horarios numerados y verificar_disponibilidad devolvió slots_map:
-  slots_map = {
-    1: {time_12h: "12:00 PM", time_24h: "12:00"},
-    2: {time_12h: "12:15 PM", time_24h: "12:15"},
-    3: {time_12h: "1:00 PM", time_24h: "13:00"}
-  }
-Usuario: "2" o "dos" o "la 2" o "2 esta bien"
-→ ⚠️ CRÍTICO: El usuario eligió la OPCIÓN 2 → DEBES usar slots_map[2].time_24h = "12:15"
-→ PRIMERO: [verificar_disponibilidad: serviceId, stylistName="sofia", date="2026-01-21", time="12:15"]
-→ Luego: Si está disponible, confirmar con: "Perfecto, ¿confirmo tu cita para mañana a las 12:15 PM?"
-→ ⚠️ NO uses "2" como hora. NO uses "12:00" (esa es la opción 1). USA slots_map[2].time_24h = "12:15"
-
-EJEMPLO 3 - Sin fecha previa:
-Contexto: 📋 Servicio: Corte Caballero (sin fecha)
-Usuario: "sofia"
-→ NO hay fecha en contexto
-→ "¡Perfecto! ¿Para qué fecha quieres tu cita con Sofía?"
-
-EJEMPLO 4 - Todo junto (usuario dice todo de una vez):
-Usuario: "Quiero una cita para mañana 9:30 am para corte con carlos roa"
-→ [buscar_servicio: "corte"] PRIMERO para obtener el service_id (solo internamente, NO muestres la lista de estilistas)
-→ Extraer del mensaje: fecha="mañana", hora="09:30", estilista="carlos roa"
-→ [verificar_disponibilidad: serviceId="...", stylistName="carlos roa", date="2026-01-22", time="09:30"]
-→ ⚠️ NO muestres: "Estos estilistas ofrecen..." (el usuario ya eligió estilista)
-→ Responder DIRECTAMENTE: "Carlos está disponible mañana a las 9:30 AM. ¿Confirmo tu cita?"
-→ Si NO disponible: "Carlos no está disponible a las 9:30 AM mañana. Horarios disponibles: 10:00 AM, 11:00 AM... ¿Cuál prefieres?"
-
-EJEMPLO 5 - Todo junto con nombre completo:
-Usuario: "corte caballero con carlos roa para el viernes a las 2pm"
-→ [buscar_servicio: "corte caballero"] PRIMERO (solo para obtener service_id, NO muestres estilistas)
-→ Extraer: fecha="viernes" → 2026-01-24, hora="14:00", estilista="carlos roa"
-→ [verificar_disponibilidad: serviceId, stylistName="carlos roa", date="2026-01-24", time="14:00"]
-→ ⚠️ NO muestres la lista de estilistas (el usuario ya eligió)
-→ Responder directamente con disponibilidad: "Carlos está disponible el viernes a las 2:00 PM. ¿Confirmo tu cita?"
 
 REGLA DE ORO: 
 - Si el usuario pide un servicio → LLAMA buscar_servicio INMEDIATAMENTE
@@ -927,20 +806,16 @@ REGLA DE ORO:
 - SIEMPRE di el resultado directamente, NO digas "Voy a verificar" ni "Un momento"
 - ⚠️ NO muestres listas de estilistas si el usuario ya especificó qué estilista quiere`;
 
-    // Funciones
     const FUNCTIONS = [
         {
             type: "function",
             function: {
                 name: "buscar_servicio",
-                description: "Busca un servicio y devuelve los estilistas que lo ofrecen. USA ESTA FUNCIÓN cuando el usuario pida un servicio (ej: 'quiero un servicio', 'necesito corte', 'manicure'). Si el usuario no especifica qué servicio, usa 'servicio' como palabra clave. ⚠️ IMPORTANTE: Si el usuario ya mencionó un estilista específico en su mensaje (ej: 'corte con carlos'), NO muestres la lista de estilistas, solo usa esta función para obtener el service_id y luego verifica disponibilidad directamente.",
+                description: "Busca un servicio y devuelve los estilistas que lo ofrecen.",
                 parameters: {
                     type: "object",
                     properties: {
-                        service: {
-                            type: "string",
-                            description: "Nombre del servicio. Si el usuario dice solo 'quiero un servicio', usa 'servicio'. Si dice 'corte', 'manicure', etc., usa esa palabra exacta."
-                        }
+                        service: { type: "string", description: "Nombre del servicio" }
                     },
                     required: ["service"]
                 }
@@ -950,30 +825,15 @@ REGLA DE ORO:
             type: "function",
             function: {
                 name: "verificar_disponibilidad",
-                description: "Verifica horarios disponibles. REQUIERE fecha. Puede usar stylistName para buscar por nombre.",
+                description: "Verifica horarios disponibles. REQUIERE fecha.",
                 parameters: {
                     type: "object",
                     properties: {
-                        serviceId: {
-                            type: "string",
-                            description: "UUID del servicio (OBLIGATORIO - usa el del contexto)"
-                        },
-                        stylistId: {
-                            type: "string",
-                            description: "UUID del estilista (opcional - solo si ya lo tienes)"
-                        },
-                        stylistName: {
-                            type: "string",
-                            description: "Nombre del estilista (usa esto cuando el usuario mencione un nombre)"
-                        },
-                        date: {
-                            type: "string",
-                            description: "Fecha en formato YYYY-MM-DD (OBLIGATORIO)"
-                        },
-                        time: {
-                            type: "string",
-                            description: "Hora en formato HH:mm (opcional)"
-                        }
+                        serviceId: { type: "string", description: "UUID del servicio (OBLIGATORIO)" },
+                        stylistId: { type: "string", description: "UUID del estilista (opcional)" },
+                        stylistName: { type: "string", description: "Nombre del estilista" },
+                        date: { type: "string", description: "Fecha en formato YYYY-MM-DD (OBLIGATORIO)" },
+                        time: { type: "string", description: "Hora en formato HH:mm (opcional)" }
                     },
                     required: ["serviceId", "date"]
                 }
@@ -987,26 +847,11 @@ REGLA DE ORO:
                 parameters: {
                     type: "object",
                     properties: {
-                        serviceId: {
-                            type: "string",
-                            description: "UUID del servicio"
-                        },
-                        stylistId: {
-                            type: "string",
-                            description: "UUID del estilista"
-                        },
-                        stylistName: {
-                            type: "string",
-                            description: "Nombre del estilista (alternativa al stylistId)"
-                        },
-                        date: {
-                            type: "string",
-                            description: "Fecha YYYY-MM-DD"
-                        },
-                        time: {
-                            type: "string",
-                            description: "Hora HH:mm"
-                        }
+                        serviceId: { type: "string", description: "UUID del servicio" },
+                        stylistId: { type: "string", description: "UUID del estilista" },
+                        stylistName: { type: "string", description: "Nombre del estilista" },
+                        date: { type: "string", description: "Fecha YYYY-MM-DD" },
+                        time: { type: "string", description: "Hora HH:mm" }
                     },
                     required: ["serviceId", "date", "time"]
                 }
@@ -1046,7 +891,6 @@ REGLA DE ORO:
     const data = await response.json();
     const assistantMessage = data.choices[0].message;
 
-    // Si hay llamada a función
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
         const toolCall = assistantMessage.tool_calls[0];
         const functionName = toolCall.function.name;
@@ -1058,20 +902,16 @@ REGLA DE ORO:
         let functionResult;
         let updatedContext = {};
 
-        // Ejecutar la función correspondiente
         if (functionName === 'buscar_servicio') {
-            // 🆕 Pasar date y time si están disponibles en el contexto o en el mensaje extraído
             const searchDate = bookingContext.date || extractedDateTime.date || null;
             const searchTime = bookingContext.time || extractedDateTime.time || null;
             functionResult = await callSearchService(tenantId, functionArgs.service, searchDate, searchTime);
 
-            // Guardar servicio en contexto si se encontró un servicio único
             if (functionResult.found && functionResult.service && !functionResult.multiple) {
                 updatedContext.service = functionResult.service.name;
                 updatedContext.service_id = functionResult.service.id;
                 console.log(`   ✅ Servicio guardado: ${functionResult.service.name} (${functionResult.service.id})`);
                 
-                // Si ya hay fecha en el contexto, recordarle a GPT que la use
                 if (bookingContext.date && functionResult.stylists && functionResult.stylists.length > 0) {
                     console.log(`   📅 Fecha ya existe en contexto: ${bookingContext.date}`);
                     functionResult.date_in_context = bookingContext.date;
@@ -1079,40 +919,34 @@ REGLA DE ORO:
                 }
             }
             
-            // Si hay múltiples opciones pero found=true, mostrar las opciones al usuario
             if (functionResult.found && functionResult.multiple && functionResult.options) {
                 console.log(`   📋 Servicios encontrados (múltiples): ${functionResult.options.map(o => o.name).join(', ')}`);
-                functionResult.hint = 'Muestra estas opciones al usuario para que elija. NO digas "no encontré", di "Encontré estos servicios: ..."';
+                functionResult.hint = 'Muestra estas opciones al usuario para que elija.';
             }
         }
         else if (functionName === 'verificar_disponibilidad') {
-            // Usar IDs del contexto si no vienen en args
             const checkParams = {
                 serviceId: functionArgs.serviceId || bookingContext.service_id,
                 stylistId: functionArgs.stylistId || bookingContext.stylist_id,
-                stylistName: functionArgs.stylistName || bookingContext.stylist, // ← FIX: usar nombre del contexto
+                stylistName: functionArgs.stylistName || bookingContext.stylist,
                 date: functionArgs.date || bookingContext.date,
                 time: functionArgs.time || bookingContext.time
             };
 
             console.log(`   📋 Params finales:`, JSON.stringify(checkParams));
-
             functionResult = await callCheckAvailability(tenantId, checkParams);
 
-            // Guardar el stylist_id que devuelve el endpoint (caso: un solo estilista)
             if (functionResult.stylist && functionResult.stylist.id) {
                 updatedContext.stylist = functionResult.stylist.name;
                 updatedContext.stylist_id = functionResult.stylist.id;
                 console.log(`   ✅ Estilista guardado: ${functionResult.stylist.name} (${functionResult.stylist.id})`);
             }
 
-            // Si needsDate, guardar el estilista pero indicar que falta fecha
             if (functionResult.needsDate && functionResult.stylist) {
                 updatedContext.stylist = functionResult.stylist.name;
                 updatedContext.stylist_id = functionResult.stylist.id;
             }
 
-            // 🆕 Si el resultado tiene múltiples estilistas, buscar el que coincida con stylistName
             if (functionResult.stylists && Array.isArray(functionResult.stylists) && checkParams.stylistName) {
                 const searchName = checkParams.stylistName.toLowerCase();
                 const matchedStylist = functionResult.stylists.find(s => 
@@ -1124,45 +958,36 @@ REGLA DE ORO:
                     updatedContext.stylist = matchedStylist.name;
                     updatedContext.stylist_id = matchedStylist.id;
                     console.log(`   ✅ Estilista encontrado en lista: ${matchedStylist.name} (${matchedStylist.id})`);
-                    
-                    // Modificar el resultado para que GPT sepa qué estilista usar
                     functionResult.matched_stylist = matchedStylist;
                 }
             }
 
-            // Guardar fecha si viene en el resultado
             if (functionResult.date && !bookingContext.date) {
                 updatedContext.date = functionResult.date;
             }
 
-            // 🆕 Si el salón está cerrado y hay un siguiente día disponible, sugerirlo
             if (functionResult.salonClosed) {
                 console.log(`   ⚠️ Salón cerrado ese día`);
                 if (functionResult.nextAvailableDay) {
                     console.log(`   📅 Siguiente día disponible: ${functionResult.nextAvailableDay}`);
                 }
-                // Marcar explícitamente que NO se puede agendar
                 functionResult.can_book = false;
                 functionResult.reason = 'salon_closed';
-                // No actualizamos el contexto automáticamente, pero el mensaje ya incluye la sugerencia
             }
         }
         else if (functionName === 'agendar_cita') {
-            // 🔧 IMPORTANTE: Usar el nombre del estilista del contexto si no viene en args
             const bookParams = {
                 serviceId: functionArgs.serviceId || bookingContext.service_id,
                 stylistId: functionArgs.stylistId || bookingContext.stylist_id,
-                stylistName: functionArgs.stylistName || bookingContext.stylist, // ← FIX: usar nombre del contexto
+                stylistName: functionArgs.stylistName || bookingContext.stylist,
                 date: functionArgs.date || bookingContext.date,
                 time: functionArgs.time || bookingContext.time
             };
 
             console.log(`\n📝 [AGENDAR CITA] Preparando reserva`);
             console.log(`   ClientId: ${clientId}`);
-            console.log(`   BookingContext completo:`, JSON.stringify(bookingContext, null, 2));
             console.log(`   Params finales:`, JSON.stringify(bookParams, null, 2));
 
-            // Validar clientId antes de intentar agendar
             if (!clientId) {
                 console.log(`   ❌ Error: clientId es null o undefined`);
                 functionResult = {
@@ -1183,7 +1008,6 @@ REGLA DE ORO:
 
         console.log('\n📋 [FUNCTION RESULT]:', JSON.stringify(functionResult, null, 2).substring(0, 800));
 
-        // Segunda llamada a GPT para generar respuesta
         const followUpMessages = [
             ...messages,
             assistantMessage,
@@ -1222,7 +1046,6 @@ REGLA DE ORO:
         };
     }
 
-    // Respuesta directa de GPT
     return { response: assistantMessage.content, updatedContext: null };
 }
 
@@ -1233,17 +1056,12 @@ REGLA DE ORO:
 async function callSearchService(tenantId, service, date = null, time = null) {
     try {
         const whatsappBookingController = require('./Whatsappbookingcontroller');
-
-        const mockReq = {
-            body: { tenantId, service, date, time } // 🆕 Pasar date y time si están disponibles
-        };
-
+        const mockReq = { body: { tenantId, service, date, time } };
         let responseData = null;
         const mockRes = {
             status: (code) => mockRes,
             json: (data) => { responseData = data; return mockRes; }
         };
-
         await whatsappBookingController.searchService(mockReq, mockRes);
         return responseData || { found: false, message: 'Error buscando servicio' };
     } catch (error) {
@@ -1255,17 +1073,12 @@ async function callSearchService(tenantId, service, date = null, time = null) {
 async function callCheckAvailability(tenantId, params) {
     try {
         const whatsappBookingController = require('./Whatsappbookingcontroller');
-
-        const mockReq = {
-            body: { tenantId, ...params }
-        };
-
+        const mockReq = { body: { tenantId, ...params } };
         let responseData = null;
         const mockRes = {
             status: (code) => mockRes,
             json: (data) => { responseData = data; return mockRes; }
         };
-
         await whatsappBookingController.checkAvailability(mockReq, mockRes);
         return responseData || { available: false, message: 'Error verificando disponibilidad' };
     } catch (error) {
@@ -1277,42 +1090,21 @@ async function callCheckAvailability(tenantId, params) {
 async function callBookAppointment(tenantId, clientId, params) {
     try {
         const whatsappBookingController = require('./Whatsappbookingcontroller');
-
         console.log('\n📞 [CALL BOOK APPOINTMENT]');
         console.log('   TenantId:', tenantId);
         console.log('   ClientId:', clientId);
         console.log('   Params recibidos:', JSON.stringify(params, null, 2));
 
-        // Validaciones previas
         if (!clientId) {
             console.log('   ❌ Error: clientId no proporcionado');
-            return { booked: false, error: 'No se pudo identificar al cliente. Por favor intenta de nuevo.' };
+            return { booked: false, error: 'No se pudo identificar al cliente.' };
         }
+        if (!params.serviceId) return { booked: false, error: 'No se ha seleccionado un servicio.' };
+        if (!params.stylistId && !params.stylistName) return { booked: false, error: 'No se ha seleccionado un estilista.' };
+        if (!params.date) return { booked: false, error: 'No se ha indicado la fecha.' };
+        if (!params.time) return { booked: false, error: 'No se ha indicado la hora.' };
 
-        if (!params.serviceId) {
-            console.log('   ❌ Error: serviceId no proporcionado');
-            return { booked: false, error: 'No se ha seleccionado un servicio. ¿Qué servicio deseas?' };
-        }
-
-        if (!params.stylistId && !params.stylistName) {
-            console.log('   ❌ Error: No hay stylistId ni stylistName');
-            return { booked: false, error: 'No se ha seleccionado un estilista. ¿Con quién te gustaría la cita?' };
-        }
-
-        if (!params.date) {
-            console.log('   ❌ Error: date no proporcionado');
-            return { booked: false, error: 'No se ha indicado la fecha. ¿Para qué día quieres la cita?' };
-        }
-
-        if (!params.time) {
-            console.log('   ❌ Error: time no proporcionado');
-            return { booked: false, error: 'No se ha indicado la hora. ¿A qué hora te gustaría?' };
-        }
-
-        const mockReq = {
-            body: { tenantId, clientId, ...params }
-        };
-
+        const mockReq = { body: { tenantId, clientId, ...params } };
         let responseData = null;
         let statusCode = 200;
         const mockRes = {
@@ -1321,7 +1113,6 @@ async function callBookAppointment(tenantId, clientId, params) {
         };
 
         await whatsappBookingController.bookAppointment(mockReq, mockRes);
-        
         console.log('   📋 Respuesta del endpoint:', JSON.stringify(responseData, null, 2));
         console.log('   Status code:', statusCode);
 
@@ -1333,12 +1124,11 @@ async function callBookAppointment(tenantId, clientId, params) {
 }
 
 /* =================================================================== */
-/* ==============   OTROS ENDPOINTS (GET STATUS, ETC)   ============== */
+/* ==============   OTROS ENDPOINTS   ================================ */
 /* =================================================================== */
 
 exports.getStatus = async (req, res) => {
     const { tenantId } = req.params;
-
     if (!tenantId) return res.status(400).json({ error: 'Falta tenantId' });
 
     try {
@@ -1384,7 +1174,6 @@ exports.getStatus = async (req, res) => {
 
 exports.disconnect = async (req, res) => {
     const { tenantId } = req.body;
-
     if (!tenantId) return res.status(400).json({ error: 'Falta tenantId' });
 
     console.log(`🔌 Desconectando tenant: ${tenantId}`);
